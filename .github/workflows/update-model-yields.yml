@@ -1,0 +1,421 @@
+name: Update Kim-Wright and ACM model yields
+
+on:
+  workflow_dispatch:
+
+  # Run after your UST/TIPS public-data workflow succeeds.
+  workflow_run:
+    workflows: ["Update public market data"]
+    types:
+      - completed
+
+  # Backup weekly refresh, every Monday at 23:00 UTC.
+  schedule:
+    - cron: "0 23 * * 1"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  update-model-data:
+    # Do not run after a failed UST/TIPS workflow.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Download repository files
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install data-processing packages
+        run: |
+          pip install pandas lxml beautifulsoup4 openpyxl xlrd
+
+      - name: Download Kim-Wright and ACM fitted-yield data
+        shell: bash
+        run: |
+          python - <<'PY'
+          import io
+          import json
+          import re
+          import time
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import pandas as pd
+
+          DATA_FILE = Path("data/dashboard.json")
+
+          # Official Federal Reserve Kim-Wright data tables.
+          KW_URL_TEMPLATE = (
+              "https://www.federalreserve.gov/data/yield-curve-tables/"
+              "feds200533_{page}.html"
+          )
+
+          # Official New York Fed ACM downloadable spreadsheet.
+          ACM_URLS = [
+              "https://www.newyorkfed.org/medialibrary/media/research/data_indicators/ACMTermPremium.xls",
+              "https://www.newyorkfed.org/medialibrary/media/research/data_indicators/ACMTermPremium.xlsx",
+          ]
+
+          USER_AGENT = "Mozilla/5.0 US-Bond-Yields-Dashboard"
+
+          def download(url, attempts=4):
+              last_error = None
+
+              for attempt in range(1, attempts + 1):
+                  try:
+                      request = urllib.request.Request(
+                          url,
+                          headers={"User-Agent": USER_AGENT}
+                      )
+
+                      with urllib.request.urlopen(request, timeout=120) as response:
+                          return response.read()
+
+                  except Exception as error:
+                      last_error = error
+                      print(f"Attempt {attempt}/{attempts} failed: {url}")
+                      print(f"Reason: {error}")
+
+                      if attempt < attempts:
+                          time.sleep(10 * attempt)
+
+              raise last_error
+
+          def normalise_column(value):
+              return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+          def as_number(value):
+              try:
+                  if pd.isna(value):
+                      return None
+
+                  text = str(value).strip().replace(",", "")
+
+                  if text in ("", ".", "N/A", "NA", "nan"):
+                      return None
+
+                  return float(text)
+
+              except (ValueError, TypeError):
+                  return None
+
+          def to_iso_date(value, dayfirst=False):
+              date = pd.to_datetime(value, errors="coerce", dayfirst=dayfirst)
+
+              if pd.isna(date):
+                  return None
+
+              return date.strftime("%Y-%m-%d")
+
+          def read_existing_dashboard():
+              if DATA_FILE.exists():
+                  with open(DATA_FILE, "r", encoding="utf-8") as file:
+                      return json.load(file)
+
+              return {
+                  "generated_at_utc": "",
+                  "sources": {},
+                  "series": {
+                      "ust": [],
+                      "tips": [],
+                      "cds": [],
+                      "kw": [],
+                      "acm": []
+                  }
+              }
+
+          def flatten_columns(columns):
+              output = []
+
+              for column in columns:
+                  if isinstance(column, tuple):
+                      output.append(
+                          " ".join(
+                              str(part)
+                              for part in column
+                              if str(part).lower() != "nan"
+                          ).strip()
+                      )
+                  else:
+                      output.append(str(column).strip())
+
+              return output
+
+          def get_kw_data():
+              """
+              Kim-Wright: THREEFY0200.B / THREEFY0500.B / THREEFY1000.B
+              mean fitted zero-coupon yields at 2Y / 5Y / 10Y.
+              """
+              rows = []
+
+              # The official Fed history is split across numbered HTML pages.
+              for page_number in range(1, 21):
+                  url = KW_URL_TEMPLATE.format(page=page_number)
+
+                  try:
+                      html = download(url)
+                      tables = pd.read_html(io.StringIO(html.decode("utf-8", errors="replace")))
+
+                  except Exception as error:
+                      print(f"Kim-Wright page {page_number} skipped: {error}")
+                      continue
+
+                  for table in tables:
+                      table.columns = flatten_columns(table.columns)
+                      columns = list(table.columns)
+
+                      if (
+                          "THREEFY0200.B" not in columns
+                          or "THREEFY0500.B" not in columns
+                          or "THREEFY1000.B" not in columns
+                      ):
+                          continue
+
+                      date_column = next(
+                          (column for column in columns if normalise_column(column) == "date"),
+                          None
+                      )
+
+                      if not date_column:
+                          continue
+
+                      for _, record in table.iterrows():
+                          date = to_iso_date(record[date_column], dayfirst=True)
+
+                          if date:
+                              rows.append({
+                                  "date": date,
+                                  "y2": as_number(record["THREEFY0200.B"]),
+                                  "y5": as_number(record["THREEFY0500.B"]),
+                                  "y10": as_number(record["THREEFY1000.B"])
+                              })
+
+              merged = {row["date"]: row for row in rows}
+
+              result = [merged[date] for date in sorted(merged)]
+
+              if not result:
+                  raise RuntimeError(
+                      "No Kim-Wright fitted-yield records were extracted."
+                  )
+
+              return result
+
+          def find_acm_column(columns, tenor):
+              """
+              New York Fed ACM spreadsheet convention:
+              ACMY02, ACMY05 and ACMY10 are model fitted yields.
+
+              The additional alternatives make the workflow resilient if
+              the publisher changes the displayed spreadsheet headers.
+              """
+              normalised = {
+                  column: normalise_column(column)
+                  for column in columns
+              }
+
+              preferred = [
+                  f"acmy{tenor:02d}",
+                  f"acmy{tenor}",
+                  f"fittedyield{tenor}",
+                  f"fittedyield{tenor}year",
+                  f"yield{tenor}",
+                  f"yield{tenor}year"
+              ]
+
+              for target in preferred:
+                  for original, cleaned in normalised.items():
+                      if cleaned == target:
+                          return original
+
+              raise RuntimeError(
+                  f"Cannot find ACM fitted {tenor}Y yield column. "
+                  f"Available columns: {list(columns)}"
+              )
+
+          def get_acm_data():
+              spreadsheet = None
+              used_url = None
+
+              for url in ACM_URLS:
+                  try:
+                      spreadsheet = download(url)
+                      used_url = url
+                      print(f"Downloaded ACM spreadsheet: {url}")
+                      break
+                  except Exception as error:
+                      print(f"ACM URL not available: {url}")
+                      print(f"Reason: {error}")
+
+              if spreadsheet is None:
+                  raise RuntimeError("Could not download the ACM spreadsheet.")
+
+              excel = pd.ExcelFile(io.BytesIO(spreadsheet))
+              print(f"ACM worksheets found: {excel.sheet_names}")
+
+              for sheet_name in excel.sheet_names:
+                  # Read without headers first. This lets the script handle
+                  # introductory title rows in the official spreadsheet.
+                  raw = pd.read_excel(excel, sheet_name=sheet_name, header=None)
+
+                  for header_row in range(min(20, len(raw))):
+                      candidate_headers = [
+                          str(value).strip()
+                          for value in raw.iloc[header_row].tolist()
+                      ]
+
+                      normalised_headers = [
+                          normalise_column(value)
+                          for value in candidate_headers
+                      ]
+
+                      has_date = any("date" in value for value in normalised_headers)
+                      has_acm_yield = any(
+                          value in ("acmy02", "acmy2", "acmy05", "acmy5", "acmy10")
+                          for value in normalised_headers
+                      )
+
+                      if not (has_date and has_acm_yield):
+                          continue
+
+                      frame = raw.iloc[header_row + 1:].copy()
+                      frame.columns = candidate_headers
+                      frame = frame.dropna(how="all")
+
+                      columns = list(frame.columns)
+
+                      date_column = next(
+                          (
+                              column for column in columns
+                              if "date" in normalise_column(column)
+                          ),
+                          None
+                      )
+
+                      y2_column = find_acm_column(columns, 2)
+                      y5_column = find_acm_column(columns, 5)
+                      y10_column = find_acm_column(columns, 10)
+
+                      output = []
+
+                      for _, record in frame.iterrows():
+                          date = to_iso_date(record[date_column])
+
+                          if date:
+                              output.append({
+                                  "date": date,
+                                  "y2": as_number(record[y2_column]),
+                                  "y5": as_number(record[y5_column]),
+                                  "y10": as_number(record[y10_column])
+                              })
+
+                      merged = {row["date"]: row for row in output}
+                      result = [merged[date] for date in sorted(merged)]
+
+                      if result:
+                          print(
+                              f"ACM fitted-yield columns selected: "
+                              f"2Y={y2_column}; 5Y={y5_column}; 10Y={y10_column}"
+                          )
+                          return result
+
+              raise RuntimeError(
+                  "No ACM worksheet with fitted-yield columns was found."
+              )
+
+          dashboard = read_existing_dashboard()
+
+          dashboard.setdefault("sources", {})
+          dashboard.setdefault("series", {})
+          dashboard["series"].setdefault("ust", [])
+          dashboard["series"].setdefault("tips", [])
+          dashboard["series"].setdefault("cds", [])
+          dashboard["series"].setdefault("kw", [])
+          dashboard["series"].setdefault("acm", [])
+
+          # Kim-Wright update.
+          try:
+              kw = get_kw_data()
+              dashboard["series"]["kw"] = kw
+              dashboard["sources"]["kim_wright"] = (
+                  "Federal Reserve Board Three-Factor Nominal Term Structure Model"
+              )
+
+              print(
+                  f"Kim-Wright records: {len(kw)}; "
+                  f"latest date: {kw[-1]['date']}"
+              )
+
+          except Exception as error:
+              print(f"WARNING: Kim-Wright update failed: {error}")
+              print("Existing Kim-Wright dashboard data was retained.")
+
+          # ACM update.
+          try:
+              acm = get_acm_data()
+              dashboard["series"]["acm"] = acm
+              dashboard["sources"]["acm"] = (
+                  "Federal Reserve Bank of New York ACM Term Premia data"
+              )
+
+              print(
+                  f"ACM records: {len(acm)}; "
+                  f"latest date: {acm[-1]['date']}"
+              )
+
+          except Exception as error:
+              print(f"WARNING: ACM update failed: {error}")
+              print("Existing ACM dashboard data was retained.")
+
+          dashboard["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+
+          DATA_FILE.parent.mkdir(exist_ok=True)
+
+          with open(DATA_FILE, "w", encoding="utf-8") as file:
+              json.dump(dashboard, file, separators=(",", ":"))
+
+          print("Saved updated data/dashboard.json")
+          PY
+
+      - name: Save updated dashboard data
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/dashboard.json
+
+          if git diff --cached --quiet; then
+            echo "No model-data changes to commit."
+          else
+            git commit -m "Update Kim-Wright and ACM fitted yields"
+            git push
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload current dashboard to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      - name: Deploy refreshed dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4
