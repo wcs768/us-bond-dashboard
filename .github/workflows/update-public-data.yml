@@ -23,7 +23,7 @@ jobs:
           set -e
 
           CURRENT_YEAR=$(date -u +%Y)
-          PREVIOUS_YEAR=$((CURRENT_YEAR - 1))
+          PREVIOUS_YEAR=$((CURRENT_YEAR - 10))
 
           echo "Downloading US Treasury nominal and real yield curves..."
 
