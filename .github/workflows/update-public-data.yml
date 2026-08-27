@@ -17,15 +17,18 @@ jobs:
       - name: Download repository files
         uses: actions/checkout@v4
 
-      - name: Download official US Treasury yield-curve data
+      - name: Download 10 years of official US Treasury yield-curve data
         shell: bash
         run: |
           set -e
 
           CURRENT_YEAR=$(date -u +%Y)
-          PREVIOUS_YEAR=$((CURRENT_YEAR - 10))
 
-          echo "Downloading US Treasury nominal and real yield curves..."
+          # Download an extra calendar year so the dashboard always has
+          # a full trailing 10-year history, even during the current year.
+          START_YEAR=$((CURRENT_YEAR - 10))
+
+          echo "Downloading Treasury data from ${START_YEAR} through ${CURRENT_YEAR}..."
 
           download_file () {
             URL="$1"
@@ -37,47 +40,49 @@ jobs:
               --location \
               --retry 3 \
               --retry-delay 5 \
+              --retry-all-errors \
               --connect-timeout 30 \
-              --max-time 120 \
-              --user-agent "Mozilla/5.0" \
+              --max-time 180 \
+              --user-agent "Mozilla/5.0 US-Bond-Yields-Dashboard" \
               "$URL" \
               --output "$OUTPUT"
           }
 
-          # Nominal Treasury par-yield curve: current and previous calendar year
-          download_file \
-            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${CURRENT_YEAR}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${CURRENT_YEAR}&page&_format=csv" \
-            "/tmp/nominal_current.csv"
+          mkdir -p /tmp/treasury-data
 
-          download_file \
-            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${PREVIOUS_YEAR}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${PREVIOUS_YEAR}&page&_format=csv" \
-            "/tmp/nominal_previous.csv"
+          for YEAR in $(seq "$START_YEAR" "$CURRENT_YEAR"); do
+            echo "Downloading nominal Treasury curve for ${YEAR}..."
 
-          # TIPS / Treasury real par-yield curve: current and previous calendar year
-          download_file \
-            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${CURRENT_YEAR}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${CURRENT_YEAR}&page&_format=csv" \
-            "/tmp/real_current.csv"
+            download_file \
+              "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${YEAR}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${YEAR}&page&_format=csv" \
+              "/tmp/treasury-data/nominal_${YEAR}.csv"
 
-          download_file \
-            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${PREVIOUS_YEAR}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${PREVIOUS_YEAR}&page&_format=csv" \
-            "/tmp/real_previous.csv"
+            echo "Downloading TIPS real-yield curve for ${YEAR}..."
 
-          echo "Files downloaded successfully:"
-          wc -c /tmp/nominal_current.csv /tmp/nominal_previous.csv /tmp/real_current.csv /tmp/real_previous.csv
+            download_file \
+              "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${YEAR}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${YEAR}&page&_format=csv" \
+              "/tmp/treasury-data/real_${YEAR}.csv"
+          done
 
-      - name: Create dashboard data file
+          echo "Downloaded files:"
+          ls -lh /tmp/treasury-data/
+
+      - name: Create 10-year dashboard data file
         shell: bash
         run: |
           python - <<'PY'
           import csv
+          import glob
           import json
           import os
           from datetime import datetime, timezone
 
+          DATA_FILE = "data/dashboard.json"
+
           def number(value):
               value = (value or "").strip().replace(",", "")
 
-              if value in ("", "N/A", "NA", "-"):
+              if value in ("", "N/A", "NA", "-", "."):
                   return None
 
               try:
@@ -86,102 +91,128 @@ jobs:
                   return None
 
           def get_value(row, possible_names):
-              """
-              Treasury occasionally changes spacing or case in CSV headers.
-              This permits multiple possible header labels.
-              """
               normalised = {
                   str(key).strip().lower(): value
                   for key, value in row.items()
               }
 
               for name in possible_names:
-                  value = normalised.get(name.lower())
-
-                  if value is not None:
-                      return value
+                  if name.lower() in normalised:
+                      return normalised[name.lower()]
 
               return None
 
-          def read_treasury_csv(file_names, curve_type):
-              output = []
+          def convert_date(value):
+              if not value:
+                  return None
 
-              for file_name in file_names:
+              value = value.strip()
+
+              for date_format in ("%m/%d/%Y", "%Y-%m-%d"):
+                  try:
+                      return datetime.strptime(value, date_format).strftime("%Y-%m-%d")
+                  except ValueError:
+                      pass
+
+              return None
+
+          def read_curve_files(file_pattern, curve_type):
+              observations = []
+
+              for file_name in sorted(glob.glob(file_pattern)):
+                  print(f"Reading {file_name}")
+
                   with open(file_name, "r", encoding="utf-8-sig") as file:
                       reader = csv.DictReader(file)
 
                       for row in reader:
-                          date = get_value(row, ["Date", "DATE", "Date (MM/DD/YYYY)"])
+                          date = convert_date(
+                              get_value(row, ["Date", "DATE", "Date (MM/DD/YYYY)"])
+                          )
 
                           if not date:
                               continue
 
-                          try:
-                              parsed_date = datetime.strptime(date.strip(), "%m/%d/%Y")
-                              iso_date = parsed_date.strftime("%Y-%m-%d")
-                          except ValueError:
-                              continue
-
                           if curve_type == "nominal":
-                              output.append({
-                                  "date": iso_date,
+                              observations.append({
+                                  "date": date,
                                   "y2": number(get_value(row, ["2 Yr", "2-year", "2 Year"])),
                                   "y5": number(get_value(row, ["5 Yr", "5-year", "5 Year"])),
                                   "y10": number(get_value(row, ["10 Yr", "10-year", "10 Year"])),
                                   "y30": number(get_value(row, ["30 Yr", "30-year", "30 Year"]))
                               })
 
-                          if curve_type == "real":
-                              output.append({
-                                  "date": iso_date,
+                          elif curve_type == "real":
+                              observations.append({
+                                  "date": date,
                                   "y5": number(get_value(row, ["5 Yr", "5-year", "5 Year"])),
                                   "y10": number(get_value(row, ["10 Yr", "10-year", "10 Year"])),
                                   "y30": number(get_value(row, ["30 Yr", "30-year", "30 Year"]))
                               })
 
-              # Merge duplicate dates and sort them.
-              merged = {row["date"]: row for row in output}
-              return [merged[date] for date in sorted(merged)]
+              # Remove duplicates, then put records in date order.
+              unique_records = {
+                  item["date"]: item
+                  for item in observations
+              }
 
-          ust = read_treasury_csv(
-              ["/tmp/nominal_previous.csv", "/tmp/nominal_current.csv"],
+              return [
+                  unique_records[date]
+                  for date in sorted(unique_records)
+              ]
+
+          ust = read_curve_files(
+              "/tmp/treasury-data/nominal_*.csv",
               "nominal"
           )
 
-          tips = read_treasury_csv(
-              ["/tmp/real_previous.csv", "/tmp/real_current.csv"],
+          tips = read_curve_files(
+              "/tmp/treasury-data/real_*.csv",
               "real"
           )
 
           if not ust:
-              raise RuntimeError("No nominal Treasury data was extracted.")
+              raise RuntimeError("No nominal Treasury observations were extracted.")
 
           if not tips:
-              raise RuntimeError("No TIPS real-yield data was extracted.")
+              raise RuntimeError("No TIPS real-yield observations were extracted.")
 
-          dashboard = {
-              "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-              "sources": {
-                  "ust_tips": "US Department of the Treasury daily par yield curves",
-                  "kim_wright": "Not yet automated",
-                  "acm": "Not yet automated",
-                  "cds": "Not configured"
-              },
-              "series": {
-                  "ust": ust,
-                  "tips": tips,
-                  "cds": [],
-                  "kw": [],
-                  "acm": []
-              }
-          }
+          # Read the existing file first. This prevents the public-data
+          # workflow from deleting existing CDS, Kim-Wright, or ACM data.
+          if os.path.exists(DATA_FILE):
+              with open(DATA_FILE, "r", encoding="utf-8") as file:
+                  dashboard = json.load(file)
+          else:
+              dashboard = {}
+
+          dashboard.setdefault("sources", {})
+          dashboard.setdefault("series", {})
+
+          dashboard["sources"]["ust_tips"] = (
+              "US Department of the Treasury daily par yield curves"
+          )
+
+          dashboard["series"]["ust"] = ust
+          dashboard["series"]["tips"] = tips
+
+          # Preserve data created by the other workflows.
+          dashboard["series"].setdefault("cds", [])
+          dashboard["series"].setdefault("kw", [])
+          dashboard["series"].setdefault("acm", [])
+
+          dashboard["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
 
           os.makedirs("data", exist_ok=True)
 
-          with open("data/dashboard.json", "w", encoding="utf-8") as file:
+          with open(DATA_FILE, "w", encoding="utf-8") as file:
               json.dump(dashboard, file, separators=(",", ":"))
 
-          print(f"Created dashboard.json with {len(ust)} UST and {len(tips)} TIPS records.")
+          print("")
+          print(f"Created dashboard.json with {len(ust)} UST records.")
+          print(f"Latest UST observation:  {ust[-1]['date']}")
+          print(f"Created dashboard.json with {len(tips)} TIPS records.")
+          print(f"Latest TIPS observation: {tips[-1]['date']}")
+          print("Kim-Wright / ACM / CDS data, if present, were preserved.")
           PY
 
       - name: Save updated data to repository
@@ -195,6 +226,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else
-            git commit -m "Update UST and TIPS dashboard data"
+            git commit -m "Update 10-year Treasury and TIPS dashboard data"
             git push
           fi
