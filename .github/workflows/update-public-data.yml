@@ -1,0 +1,120 @@
+name: Update public market data
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "30 22 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-save-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository files
+        uses: actions/checkout@v4
+
+      - name: Download FRED Treasury and TIPS data
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import io
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timezone
+
+          url = (
+              "https://fred.stlouisfed.org/graph/fredgraph.csv"
+              "?id=DGS2,DGS5,DGS10,DGS30,DFII5,DFII10,DFII30"
+          )
+
+          request = urllib.request.Request(
+              url,
+              headers={"User-Agent": "Mozilla/5.0"}
+          )
+
+          with urllib.request.urlopen(request, timeout=60) as response:
+              text = response.read().decode("utf-8")
+
+          def number(value):
+              value = (value or "").strip()
+              if value in ("", "."):
+                  return None
+              try:
+                  return float(value)
+              except ValueError:
+                  return None
+
+          reader = csv.DictReader(io.StringIO(text))
+
+          ust = []
+          tips = []
+
+          for row in reader:
+              date = row.get("observation_date")
+
+              if not date:
+                  continue
+
+              ust.append({
+                  "date": date,
+                  "y2": number(row.get("DGS2")),
+                  "y5": number(row.get("DGS5")),
+                  "y10": number(row.get("DGS10")),
+                  "y30": number(row.get("DGS30"))
+              })
+
+              tips.append({
+                  "date": date,
+                  "y5": number(row.get("DFII5")),
+                  "y10": number(row.get("DFII10")),
+                  "y30": number(row.get("DFII30"))
+              })
+
+          output = {
+              "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+              "sources": {
+                  "ust_tips": "Federal Reserve H.15 via FRED",
+                  "kim_wright": "Not yet automated",
+                  "acm": "Not yet automated",
+                  "cds": "Not configured"
+              },
+              "series": {
+                  "ust": ust,
+                  "tips": tips,
+                  "cds": [],
+                  "kw": [],
+                  "acm": []
+              }
+          }
+
+          os.makedirs("data", exist_ok=True)
+
+          with open("data/dashboard.json", "w", encoding="utf-8") as file:
+              json.dump(output, file, separators=(",", ":"))
+
+          print(
+              f"Saved {len(ust)} nominal Treasury and "
+              f"{len(tips)} TIPS observations."
+          )
+          PY
+
+      - name: Save updated data to repository
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/dashboard.json
+
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "Update Treasury and TIPS dashboard data"
+            git push
+          fi
