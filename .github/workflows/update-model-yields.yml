@@ -517,15 +517,28 @@ jobs:
         
             return result
         
-            dashboard = read_existing_dashboard()
+          # Load the existing dashboard so UST, TIPS and CDS data are retained.
+          if DATA_FILE.exists():
+              with open(DATA_FILE, "r", encoding="utf-8") as file:
+                  dashboard = json.load(file)
+          else:
+              dashboard = {
+                  "generated_at_utc": "",
+                  "sources": {},
+                  "series": {}
+              }
+
+          dashboard.setdefault("sources", {})
+          dashboard.setdefault("series", {})
+
+          # Preserve data maintained by other workflows.
+          dashboard["series"].setdefault("ust", [])
+          dashboard["series"].setdefault("tips", [])
+          dashboard["series"].setdefault("cds", [])
+          dashboard["series"].setdefault("kw", [])
+          dashboard["series"].setdefault("acm", [])
   
-            dashboard.setdefault("sources", {})
-            dashboard.setdefault("series", {})
-            dashboard["series"].setdefault("ust", [])
-            dashboard["series"].setdefault("tips", [])
-            dashboard["series"].setdefault("cds", [])
-            dashboard["series"].setdefault("kw", [])
-            dashboard["series"].setdefault("acm", [])
+
   
             # Kim-Wright update.
             kw = get_kw_data()
