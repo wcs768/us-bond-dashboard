@@ -19,27 +19,30 @@
       --teal: #0f9d8a;
       --orange: #ef8b2c;
       --purple: #7c5ce6;
+      --red: #c2414b;
       --shadow: 0 3px 14px rgba(16, 42, 67, 0.08);
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
 
     body {
       margin: 0;
-      background: var(--bg);
       color: var(--ink);
+      background: var(--bg);
       font-family: Arial, Helvetica, sans-serif;
     }
 
     header {
-      background: linear-gradient(120deg, #102a43, #1c4f7a);
-      color: white;
       padding: 24px 32px;
+      color: white;
+      background: linear-gradient(120deg, #102a43, #1c4f7a);
     }
 
     h1 {
-      font-size: 25px;
       margin: 0 0 7px;
+      font-size: 25px;
     }
 
     header p {
@@ -50,43 +53,44 @@
 
     main {
       max-width: 1600px;
-      margin: auto;
       padding: 24px;
+      margin: auto;
     }
 
-    .toolbar, .chart-card {
+    .toolbar,
+    .card {
       background: var(--panel);
       border: 1px solid var(--line);
-      box-shadow: var(--shadow);
       border-radius: 10px;
+      box-shadow: var(--shadow);
     }
 
     .toolbar {
-      padding: 14px 17px;
       display: flex;
-      justify-content: space-between;
-      align-items: center;
       flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
       gap: 12px;
+      padding: 14px 17px;
       margin-bottom: 20px;
     }
 
     button {
-      border: 1px solid #cbd5e1;
-      background: white;
-      border-radius: 6px;
       padding: 7px 11px;
+      margin-right: 4px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      color: #334155;
+      background: white;
+      cursor: pointer;
       font-size: 13px;
       font-weight: 600;
-      color: #334155;
-      cursor: pointer;
-      margin-right: 4px;
     }
 
     button.active {
-      background: var(--blue);
       color: white;
       border-color: var(--blue);
+      background: var(--blue);
     }
 
     #status {
@@ -100,24 +104,25 @@
       gap: 20px;
     }
 
-    .chart-card.wide {
+    .wide {
       grid-column: 1 / -1;
     }
 
-    .chart-title {
+    .card-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
       padding: 15px 18px;
       border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
     }
 
-    .chart-title h2 {
-      font-size: 16px;
+    .card-title h2 {
       margin: 0;
+      font-size: 16px;
     }
 
-    .chart-title p {
+    .card-title p {
       margin: 5px 0 0;
       color: var(--muted);
       font-size: 12px;
@@ -129,24 +134,60 @@
       white-space: nowrap;
     }
 
-    .canvas-wrap {
+    .chart-wrap {
       height: 345px;
       padding: 15px;
     }
 
+    .component-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+      padding: 12px 18px 0;
+    }
+
+    .component-controls span {
+      margin-right: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: bold;
+    }
+
     .note {
+      padding: 10px 18px;
+      color: var(--muted);
       border-top: 1px solid var(--line);
       background: #fbfcfe;
-      padding: 9px 18px;
       font-size: 11px;
-      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 6px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .swatch {
+      display: inline-block;
+      width: 14px;
+      height: 10px;
+      border-radius: 2px;
     }
 
     footer {
+      margin-top: 20px;
       color: var(--muted);
       font-size: 12px;
-      line-height: 1.6;
-      margin-top: 20px;
+      line-height: 1.65;
     }
 
     footer a {
@@ -155,8 +196,17 @@
     }
 
     @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
-      .chart-card.wide { grid-column: auto; }
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .wide {
+        grid-column: auto;
+      }
+
+      .card-title {
+        flex-direction: column;
+      }
     }
   </style>
 </head>
@@ -165,8 +215,8 @@
   <header>
     <h1>US Bond Yields Dashboard</h1>
     <p>
-      Nominal Treasury yields, TIPS real yields, U.S. sovereign CDS,
-      Kim–Wright and ACM fitted zero-coupon nominal yields.
+      Treasury yields, TIPS real yields, U.S. sovereign CDS,
+      Kim–Wright and ACM nominal term-structure components.
     </p>
   </header>
 
@@ -176,84 +226,190 @@
         <button class="range active" data-range="1Y">1Y</button>
         <button class="range" data-range="3Y">3Y</button>
         <button class="range" data-range="5Y">5Y</button>
+        <button class="range" data-range="10Y">10Y</button>
         <button class="range" data-range="MAX">Max</button>
       </div>
+
       <div id="status">Loading dashboard data…</div>
     </section>
 
     <section class="grid">
-      <article class="chart-card">
-        <div class="chart-title">
+      <article class="card">
+        <div class="card-title">
           <div>
             <h2>1. U.S. Treasury Nominal Yields</h2>
-            <p>2Y, 5Y, 10Y and 30Y Treasury constant-maturity yields.</p>
+            <p>2Y, 5Y, 10Y and 30Y constant-maturity Treasury yields.</p>
           </div>
           <div class="last-date" id="ust-date"></div>
         </div>
-        <div class="canvas-wrap"><canvas id="ust-chart"></canvas></div>
-        <div class="note">Unit: percent (%). Source: Federal Reserve H.15 via FRED.</div>
+
+        <div class="chart-wrap">
+          <canvas id="ust-chart"></canvas>
+        </div>
+
+        <div class="note">
+          Unit: percent (%). Source: U.S. Department of the Treasury.
+        </div>
       </article>
 
-      <article class="chart-card">
-        <div class="chart-title">
+      <article class="card">
+        <div class="card-title">
           <div>
             <h2>2. TIPS Real Yields</h2>
-            <p>5Y, 10Y and 30Y inflation-indexed Treasury real yields.</p>
+            <p>5Y, 10Y and 30Y Treasury inflation-protected real yields.</p>
           </div>
           <div class="last-date" id="tips-date"></div>
         </div>
-        <div class="canvas-wrap"><canvas id="tips-chart"></canvas></div>
-        <div class="note">Unit: percent (%). The 2Y TIPS point has been excluded.</div>
+
+        <div class="chart-wrap">
+          <canvas id="tips-chart"></canvas>
+        </div>
+
+        <div class="note">
+          Unit: percent (%). Source: U.S. Department of the Treasury.
+        </div>
       </article>
 
-      <article class="chart-card">
-        <div class="chart-title">
+      <article class="card">
+        <div class="card-title">
           <div>
             <h2>3. U.S. Sovereign CDS</h2>
             <p>2Y, 5Y and 10Y CDS mid spreads.</p>
           </div>
           <div class="last-date" id="cds-date"></div>
         </div>
-        <div class="canvas-wrap"><canvas id="cds-chart"></canvas></div>
-        <div class="note">Unit: basis points (bp). Source: licensed vendor API.</div>
+
+        <div class="chart-wrap">
+          <canvas id="cds-chart"></canvas>
+        </div>
+
+        <div class="note">
+          Unit: basis points (bp). Requires an authorised CDS data vendor.
+        </div>
       </article>
 
-      <article class="chart-card">
-        <div class="chart-title">
+      <article class="card wide">
+        <div class="card-title">
           <div>
-            <h2>4. Kim–Wright Nominal Term Structure</h2>
-            <p>Fitted zero-coupon nominal yields: 2Y, 5Y and 10Y.</p>
+            <h2 id="kw-title">4. Kim–Wright 2Y Yield Components</h2>
+            <p>
+              Actual weekly Federal Reserve Board observations.
+              Fitted yield = expected-rate component + term premium.
+            </p>
           </div>
           <div class="last-date" id="kw-date"></div>
         </div>
-        <div class="canvas-wrap"><canvas id="kw-chart"></canvas></div>
-        <div class="note">Unit: percent (%). Source: Federal Reserve Board.</div>
+
+        <div class="component-controls">
+          <span>Maturity:</span>
+          <button class="kw-tenor active" data-tenor="2">2Y</button>
+          <button class="kw-tenor" data-tenor="5">5Y</button>
+          <button class="kw-tenor" data-tenor="10">10Y</button>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="kw-chart"></canvas>
+        </div>
+
+        <div class="note">
+          <div class="legend">
+            <span class="legend-item">
+              <span class="swatch" style="background:#1f6feb"></span>
+              Expected-rate component — left axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#172033"></span>
+              Fitted zero-coupon yield — left axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#ef8b2c"></span>
+              Positive term premium — right axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#c2414b"></span>
+              Negative term premium — right axis, below zero
+            </span>
+          </div>
+        </div>
       </article>
 
-      <article class="chart-card wide">
-        <div class="chart-title">
+      <article class="card wide">
+        <div class="card-title">
           <div>
-            <h2>5. ACM Nominal Term Structure</h2>
-            <p>ACM fitted zero-coupon nominal yields: 2Y, 5Y and 10Y.</p>
+            <h2 id="acm-title">5. ACM 2Y Yield Components</h2>
+            <p>
+              Fitted yield = expected-rate component + term premium.
+            </p>
           </div>
           <div class="last-date" id="acm-date"></div>
         </div>
-        <div class="canvas-wrap"><canvas id="acm-chart"></canvas></div>
-        <div class="note">Unit: percent (%). Source: Federal Reserve Bank of New York.</div>
+
+        <div class="component-controls">
+          <span>Maturity:</span>
+          <button class="acm-tenor active" data-tenor="2">2Y</button>
+          <button class="acm-tenor" data-tenor="5">5Y</button>
+          <button class="acm-tenor" data-tenor="10">10Y</button>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="acm-chart"></canvas>
+        </div>
+
+        <div class="note">
+          <div class="legend">
+            <span class="legend-item">
+              <span class="swatch" style="background:#1f6feb"></span>
+              Expected-rate component — left axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#172033"></span>
+              Fitted zero-coupon yield — left axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#ef8b2c"></span>
+              Positive term premium — right axis
+            </span>
+
+            <span class="legend-item">
+              <span class="swatch" style="background:#c2414b"></span>
+              Negative term premium — right axis, below zero
+            </span>
+          </div>
+        </div>
       </article>
     </section>
 
     <footer>
-      <strong>Official sources:</strong>
-      <a href="https://www.federalreserve.gov/releases/h15/" target="_blank">Federal Reserve H.15</a>,
-      <a href="https://www.federalreserve.gov/data/three-factor-nominal-term-structure-model.htm" target="_blank">Kim–Wright model</a>, and
-      <a href="https://www.newyorkfed.org/research/data_indicators/term-premia-tabs" target="_blank">New York Fed ACM data</a>.
+      <strong>Sources:</strong>
+      <a href="https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics" target="_blank">
+        U.S. Treasury yield curves
+      </a>,
+      <a href="https://www.federalreserve.gov/data/three-factor-nominal-term-structure-model.htm" target="_blank">
+        Federal Reserve Board Kim–Wright model
+      </a>, and
+      <a href="https://www.newyorkfed.org/research/data_indicators/term-premia-tabs" target="_blank">
+        New York Fed ACM term-premia data
+      </a>.
       <br />
       Generated: <span id="generated-at">—</span>
     </footer>
   </main>
 
   <script>
+    const charts = {};
+    let dashboardData = null;
+    let selectedRange = "1Y";
+
+    const selectedTenors = {
+      kw: "2",
+      acm: "2"
+    };
+
     const colours = {
       y2: "#1f6feb",
       y5: "#0f9d8a",
@@ -261,15 +417,12 @@
       y30: "#7c5ce6"
     };
 
-    const charts = {};
-    let dashboardData = null;
-    let selectedRange = "1Y";
-
-    const chartDefinitions = {
+    const regularCharts = {
       ust: {
-        id: "ust-chart",
+        canvasId: "ust-chart",
         dateId: "ust-date",
-        axis: "Yield (%)",
+        axisTitle: "Yield (%)",
+        suffix: "%",
         series: [
           { field: "y2", label: "2Y", colour: colours.y2 },
           { field: "y5", label: "5Y", colour: colours.y5 },
@@ -277,41 +430,24 @@
           { field: "y30", label: "30Y", colour: colours.y30 }
         ]
       },
+
       tips: {
-        id: "tips-chart",
+        canvasId: "tips-chart",
         dateId: "tips-date",
-        axis: "Real yield (%)",
+        axisTitle: "Real yield (%)",
+        suffix: "%",
         series: [
           { field: "y5", label: "5Y", colour: colours.y5 },
           { field: "y10", label: "10Y", colour: colours.y10 },
           { field: "y30", label: "30Y", colour: colours.y30 }
         ]
       },
+
       cds: {
-        id: "cds-chart",
+        canvasId: "cds-chart",
         dateId: "cds-date",
-        axis: "CDS mid spread (bp)",
+        axisTitle: "CDS mid spread (bp)",
         suffix: " bp",
-        series: [
-          { field: "y2", label: "2Y", colour: colours.y2 },
-          { field: "y5", label: "5Y", colour: colours.y5 },
-          { field: "y10", label: "10Y", colour: colours.y10 }
-        ]
-      },
-      kw: {
-        id: "kw-chart",
-        dateId: "kw-date",
-        axis: "Fitted yield (%)",
-        series: [
-          { field: "y2", label: "2Y", colour: colours.y2 },
-          { field: "y5", label: "5Y", colour: colours.y5 },
-          { field: "y10", label: "10Y", colour: colours.y10 }
-        ]
-      },
-      acm: {
-        id: "acm-chart",
-        dateId: "acm-date",
-        axis: "Fitted yield (%)",
         series: [
           { field: "y2", label: "2Y", colour: colours.y2 },
           { field: "y5", label: "5Y", colour: colours.y5 },
@@ -327,87 +463,111 @@
       );
     }
 
-    function filterRange(rows) {
-      if (!rows.length || selectedRange === "MAX") return rows;
+    function asNumber(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
 
-      const last = new Date(rows[rows.length - 1].date + "T12:00:00");
-      const cutoff = new Date(last);
+    function filterByRange(rows) {
+      if (!rows.length || selectedRange === "MAX") {
+        return rows;
+      }
 
       const months = {
         "1Y": 12,
         "3Y": 36,
-        "5Y": 60
+        "5Y": 60,
+        "10Y": 120
       };
 
-      cutoff.setMonth(cutoff.getMonth() - months[selectedRange]);
+      const latestDate = new Date(rows[rows.length - 1].date + "T12:00:00");
+      const cutoffDate = new Date(latestDate);
 
-      return rows.filter(row => new Date(row.date + "T12:00:00") >= cutoff);
+      cutoffDate.setMonth(cutoffDate.getMonth() - months[selectedRange]);
+
+      return rows.filter(row => {
+        return new Date(row.date + "T12:00:00") >= cutoffDate;
+      });
     }
 
-    function createChart(name, definition) {
-      const canvas = document.getElementById(definition.id);
+    function createRegularChart(name, definition) {
+      const canvas = document.getElementById(definition.canvasId);
 
       charts[name] = new Chart(canvas, {
         type: "line",
-        data: { labels: [], datasets: [] },
+
+        data: {
+          labels: [],
+          datasets: []
+        },
+
         options: {
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          interaction: { mode: "index", intersect: false },
+
+          interaction: {
+            mode: "index",
+            intersect: false
+          },
+
           plugins: {
             legend: {
               position: "top",
-              align: "end",
-              labels: {
-                usePointStyle: true,
-                pointStyle: "line",
-                boxWidth: 14,
-                font: { size: 12 }
-              }
+              align: "end"
             },
+
             tooltip: {
               callbacks: {
                 label(context) {
-                  const value = context.parsed.y;
-                  if (value === null) return `${context.dataset.label}: —`;
-                  return `${context.dataset.label}: ${value.toFixed(2)}${definition.suffix || "%"}`;
+                  if (context.parsed.y === null) {
+                    return `${context.dataset.label}: —`;
+                  }
+
+                  return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}${definition.suffix}`;
                 }
               }
             }
           },
+
           scales: {
             x: {
               grid: { display: false },
-              ticks: { maxTicksLimit: 8, font: { size: 11 } }
+              ticks: {
+                maxTicksLimit: 8,
+                font: { size: 11 }
+              }
             },
+
             y: {
               title: {
                 display: true,
-                text: definition.axis
+                text: definition.axisTitle
               },
-              grid: { color: "rgba(102, 112, 133, 0.14)" },
-              ticks: { font: { size: 11 } }
+
+              grid: {
+                color: "rgba(102,112,133,.14)"
+              }
             }
           }
         }
       });
     }
 
-    function updateChart(name) {
-      const definition = chartDefinitions[name];
-      const rows = filterRange(dashboardData.series[name] || []);
+    function updateRegularChart(name) {
+      const definition = regularCharts[name];
       const chart = charts[name];
+      const rows = filterByRange(dashboardData.series[name] || []);
 
       chart.data.labels = rows.map(row => row.date);
 
       chart.data.datasets = definition.series.map(item => ({
         label: item.label,
-        data: rows.map(row => row[item.field]),
+        data: rows.map(row => asNumber(row[item.field])),
         borderColor: item.colour,
         backgroundColor: item.colour,
         borderWidth: 2,
-        tension: 0.16,
+        tension: 0.12,
         pointRadius: 0,
         pointHoverRadius: 3,
         spanGaps: true
@@ -415,42 +575,286 @@
 
       chart.update();
 
-      const lastDate = rows.length ? rows[rows.length - 1].date : null;
+      document.getElementById(definition.dateId).textContent = rows.length
+        ? `Last: ${formatDate(rows[rows.length - 1].date)}`
+        : "No data available";
+    }
 
-      document.getElementById(definition.dateId).textContent =
-        lastDate ? `Last: ${formatDate(lastDate)}` : "No data available";
+    function createModelChart(model) {
+      const canvas = document.getElementById(`${model}-chart`);
+
+      charts[model] = new Chart(canvas, {
+        data: {
+          labels: [],
+          datasets: []
+        },
+
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+
+          interaction: {
+            mode: "index",
+            intersect: false
+          },
+
+          plugins: {
+            legend: {
+              position: "top",
+              align: "end"
+            },
+
+            tooltip: {
+              callbacks: {
+                title(items) {
+                  return items.length ? formatDate(items[0].label) : "";
+                },
+
+                label(context) {
+                  if (context.parsed.y === null) {
+                    return `${context.dataset.label}: —`;
+                  }
+
+                  const suffix = context.dataset.yAxisID === "premiumAxis"
+                    ? "% term premium"
+                    : "%";
+
+                  return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}${suffix}`;
+                },
+
+                afterBody(items) {
+                  if (!items.length) {
+                    return "";
+                  }
+
+                  const row = items[0].chart.$modelRows[items[0].dataIndex];
+
+                  if (!row) {
+                    return "";
+                  }
+
+                  return [
+                    "",
+                    "Identity:",
+                    "Expected-rate component + term premium",
+                    "= fitted zero-coupon yield"
+                  ];
+                }
+              }
+            }
+          },
+
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: {
+                maxTicksLimit: 8,
+                font: { size: 11 }
+              }
+            },
+
+            rateAxis: {
+              position: "left",
+
+              title: {
+                display: true,
+                text: "Yield / expected-rate component (%)"
+              },
+
+              grid: {
+                color: "rgba(102,112,133,.14)"
+              }
+            },
+
+            premiumAxis: {
+              position: "right",
+
+              title: {
+                display: true,
+                text: "Term premium (%)"
+              },
+
+              grid: {
+                drawOnChartArea: false
+              },
+
+              ticks: {
+                callback(value) {
+                  return `${value}%`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    function modelRows(model, tenor) {
+      const records = dashboardData.series[model] || [];
+
+      return records
+        .map(row => {
+          const fitted = asNumber(row[`y${tenor}`]);
+          const premium = asNumber(row[`tp${tenor}`]);
+
+          // Uses saved expected-rate data if present.
+          // Otherwise calculates expected rate = fitted yield - term premium.
+          const savedExpected = asNumber(row[`er${tenor}`]);
+
+          const expected = savedExpected !== null
+            ? savedExpected
+            : (
+              fitted !== null && premium !== null
+                ? fitted - premium
+                : null
+            );
+
+          return {
+            date: row.date,
+            fitted,
+            premium,
+            expected
+          };
+        })
+        .filter(row => {
+          return row.date &&
+            row.fitted !== null &&
+            row.premium !== null &&
+            row.expected !== null;
+        });
+    }
+
+    function updateModelChart(model) {
+      const tenor = selectedTenors[model];
+      const chart = charts[model];
+      const rows = filterByRange(modelRows(model, tenor));
+
+      chart.$modelRows = rows;
+      chart.data.labels = rows.map(row => row.date);
+
+      /*
+        This is deliberately NOT a normal stacked-area chart.
+
+        A conventional stacked chart cannot correctly show a negative
+        term premium without visually overlapping the expected-rate
+        component. Therefore:
+
+        - expected rate and fitted yield use the left axis;
+        - term premium uses a separate right axis;
+        - negative term-premium bars extend below the zero line.
+      */
+      chart.data.datasets = [
+        {
+          type: "bar",
+          label: "Term premium",
+          data: rows.map(row => row.premium),
+          yAxisID: "premiumAxis",
+          backgroundColor(context) {
+            const value = context.raw;
+            return value >= 0
+              ? "rgba(239,139,44,.72)"
+              : "rgba(194,65,75,.72)";
+          },
+          borderColor(context) {
+            const value = context.raw;
+            return value >= 0 ? "#ef8b2c" : "#c2414b";
+          },
+          borderWidth: 1,
+          borderRadius: 2,
+          order: 1
+        },
+
+        {
+          type: "line",
+          label: "Expected-rate component",
+          data: rows.map(row => row.expected),
+          yAxisID: "rateAxis",
+          borderColor: "#1f6feb",
+          backgroundColor: "#1f6feb",
+          borderWidth: 2,
+          tension: 0,
+          pointRadius: model === "kw" ? 1.5 : 0,
+          pointHoverRadius: 4,
+          order: 2
+        },
+
+        {
+          type: "line",
+          label: "Fitted zero-coupon yield",
+          data: rows.map(row => row.fitted),
+          yAxisID: "rateAxis",
+          borderColor: "#172033",
+          backgroundColor: "#172033",
+          borderWidth: 2.5,
+          tension: 0,
+          pointRadius: model === "kw" ? 1.5 : 0,
+          pointHoverRadius: 4,
+          order: 3
+        }
+      ];
+
+      chart.update();
+
+      const modelName = model === "kw" ? "Kim–Wright" : "ACM";
+
+      document.getElementById(`${model}-title`).textContent =
+        `${modelName} ${tenor}Y Yield Components`;
+
+      document.getElementById(`${model}-date`).textContent = rows.length
+        ? `Last: ${formatDate(rows[rows.length - 1].date)}`
+        : "Component data unavailable";
     }
 
     function updateAllCharts() {
-      Object.keys(chartDefinitions).forEach(updateChart);
+      Object.keys(regularCharts).forEach(updateRegularChart);
+      updateModelChart("kw");
+      updateModelChart("acm");
     }
 
-    async function loadData() {
+    function setActiveTenorButton(model) {
+      document.querySelectorAll(`.${model}-tenor`).forEach(button => {
+        button.classList.toggle(
+          "active",
+          button.dataset.tenor === selectedTenors[model]
+        );
+      });
+    }
+
+    async function loadDashboardData() {
       try {
         const response = await fetch(`data/dashboard.json?v=${Date.now()}`);
 
         if (!response.ok) {
-          throw new Error(`Data file returned HTTP ${response.status}`);
+          throw new Error(`HTTP ${response.status}`);
         }
 
         dashboardData = await response.json();
 
-        Object.entries(chartDefinitions).forEach(([name, definition]) => {
-          createChart(name, definition);
+        Object.entries(regularCharts).forEach(([name, definition]) => {
+          createRegularChart(name, definition);
         });
+
+        createModelChart("kw");
+        createModelChart("acm");
 
         updateAllCharts();
 
         document.getElementById("generated-at").textContent =
           new Date(dashboardData.generated_at_utc).toLocaleString();
 
+        const kwCount = dashboardData.series.kw?.length || 0;
+        const acmCount = dashboardData.series.acm?.length || 0;
+
         document.getElementById("status").textContent =
-          "Dashboard data loaded successfully.";
+          `Loaded ${kwCount.toLocaleString()} Kim–Wright and ` +
+          `${acmCount.toLocaleString()} ACM model observations.`;
+
       } catch (error) {
         console.error(error);
 
         document.getElementById("status").textContent =
-          "Unable to load data/dashboard.json. Check the GitHub Actions workflow.";
+          "Unable to load data/dashboard.json.";
       }
     }
 
@@ -463,11 +867,36 @@
         });
 
         button.classList.add("active");
-        updateAllCharts();
+
+        if (dashboardData) {
+          updateAllCharts();
+        }
       });
     });
 
-    loadData();
+    document.querySelectorAll(".kw-tenor").forEach(button => {
+      button.addEventListener("click", () => {
+        selectedTenors.kw = button.dataset.tenor;
+        setActiveTenorButton("kw");
+
+        if (dashboardData) {
+          updateModelChart("kw");
+        }
+      });
+    });
+
+    document.querySelectorAll(".acm-tenor").forEach(button => {
+      button.addEventListener("click", () => {
+        selectedTenors.acm = button.dataset.tenor;
+        setActiveTenorButton("acm");
+
+        if (dashboardData) {
+          updateModelChart("acm");
+        }
+      });
+    });
+
+    loadDashboardData();
   </script>
 </body>
 </html>
