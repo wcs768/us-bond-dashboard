@@ -167,7 +167,7 @@ jobs:
           def get_kw_data():
             """
             Download the direct Federal Reserve Kim-Wright CSV.
-        
+
             The file has daily observations. Do not scrape the paginated HTML
             tables, because that can result in an incomplete subset of records.
             """
@@ -175,21 +175,21 @@ jobs:
                 "https://www.federalreserve.gov/data/"
                 "yield-curve-tables/feds200533.csv"
             )
-        
+
             print(f"Downloading daily Kim-Wright CSV: {kw_csv_url}")
-        
+
             csv_bytes = download(kw_csv_url)
-        
+
             frame = pd.read_csv(
                 io.BytesIO(csv_bytes),
                 encoding="utf-8-sig"
             )
-        
+
             frame.columns = [
                 str(column).strip()
                 for column in frame.columns
             ]
-        
+
             date_column = next(
                 (
                     column for column in frame.columns
@@ -197,7 +197,7 @@ jobs:
                 ),
                 None
             )
-        
+
             required_columns = [
                 "THREEFY0200.B",
                 "THREEFY0500.B",
@@ -206,22 +206,22 @@ jobs:
                 "THREEFYTP0500.B",
                 "THREEFYTP1000.B"
             ]
-        
+
             if not date_column:
                 raise RuntimeError(
                     f"Kim-Wright CSV has no Date column. Found: {list(frame.columns)}"
                 )
-        
+
             missing_columns = [
                 column for column in required_columns
                 if column not in frame.columns
             ]
-        
+
             if missing_columns:
                 raise RuntimeError(
                     f"Kim-Wright CSV is missing columns: {missing_columns}"
                 )
-        
+
             # Kim-Wright dates are typically DD-MM-YYYY.
             dates = pd.to_datetime(
                 frame[date_column].astype(str),
@@ -229,72 +229,72 @@ jobs:
                 format="mixed",
                 errors="coerce"
             )
-        
+
             frame["_date"] = dates.dt.strftime("%Y-%m-%d")
-        
+
             rows = []
-        
+
             for _, record in frame.iterrows():
                 date = record["_date"]
-        
+
                 if not isinstance(date, str) or not date:
                     continue
-        
+
                 y2 = as_number(record["THREEFY0200.B"])
                 y5 = as_number(record["THREEFY0500.B"])
                 y10 = as_number(record["THREEFY1000.B"])
-        
+
                 tp2 = as_number(record["THREEFYTP0200.B"])
                 tp5 = as_number(record["THREEFYTP0500.B"])
                 tp10 = as_number(record["THREEFYTP1000.B"])
-        
+
                 rows.append({
                     "date": date,
-        
+
                     "y2": y2,
                     "y5": y5,
                     "y10": y10,
-        
+
                     "tp2": tp2,
                     "tp5": tp5,
                     "tp10": tp10,
-        
+
                     "er2": y2 - tp2 if y2 is not None and tp2 is not None else None,
                     "er5": y5 - tp5 if y5 is not None and tp5 is not None else None,
                     "er10": y10 - tp10 if y10 is not None and tp10 is not None else None
                 })
-        
+
             # One record per calendar date, in ascending chronological order.
             merged = {
                 row["date"]: row
                 for row in rows
             }
-        
+
             result = [
                 merged[date]
                 for date in sorted(merged)
             ]
-        
+
             # Prevent a sparse extraction from overwriting the existing full history.
             if len(result) < 5000:
                 raise RuntimeError(
                     f"Kim-Wright extraction produced only {len(result)} records. "
                     "Expected thousands of daily records; dashboard data was not replaced."
                 )
-        
+
             latest_date = result[-1]["date"]
-        
+
             recent_records = [
                 row for row in result
                 if row["date"] >= latest_date[:4] + "-01-01"
             ]
-        
+
             print(
                 f"Kim-Wright DAILY records extracted: {len(result)}; "
                 f"first: {result[0]['date']}; latest: {latest_date}; "
                 f"current-year records: {len(recent_records)}"
             )
-        
+
             return result
 
           def find_acm_column(columns, tenor):
@@ -363,18 +363,18 @@ jobs:
                 "https://www.newyorkfed.org/medialibrary/media/"
                 "research/data_indicators/ACMTermPremium.xlsx"
             )
-        
+
             print(f"Downloading ACM workbook: {acm_url}")
-        
+
             spreadsheet = download(acm_url)
-        
+
             excel = pd.ExcelFile(
                 io.BytesIO(spreadsheet),
                 engine="openpyxl"
             )
-        
+
             print(f"ACM worksheets available: {excel.sheet_names}")
-        
+
             daily_sheet = next(
                 (
                     sheet_name
@@ -383,150 +383,142 @@ jobs:
                 ),
                 None
             )
-        
+
             if not daily_sheet:
                 raise RuntimeError(
                     "The ACM workbook does not contain an 'ACM Daily' worksheet. "
                     f"Worksheets found: {excel.sheet_names}"
                 )
-        
+
             print(f"Using ACM worksheet: {daily_sheet}")
-        
+
             # The workbook can contain title rows above the true column headers.
             raw = pd.read_excel(
                 excel,
                 sheet_name=daily_sheet,
                 header=None
             )
-        
+
             header_row = None
-        
+
             for row_number in range(min(30, len(raw))):
                 candidate_headers = [
                     str(value).strip()
                     for value in raw.iloc[row_number].tolist()
                 ]
-        
+
                 cleaned_headers = [
                     normalise_column(value)
                     for value in candidate_headers
                 ]
-        
+
                 has_date = any(value == "date" for value in cleaned_headers)
-        
+
                 has_required_yields = all(
                     field in cleaned_headers
                     for field in ["acmy02", "acmy05", "acmy10"]
                 )
-        
+
                 has_required_premia = all(
                     field in cleaned_headers
                     for field in ["acmtp02", "acmtp05", "acmtp10"]
                 )
-        
+
                 if has_date and has_required_yields and has_required_premia:
                     header_row = row_number
                     break
-        
+
             if header_row is None:
                 raise RuntimeError(
                     "Could not find Date, ACMY02/05/10 and ACMTP02/05/10 "
                     "columns in the ACM Daily worksheet."
                 )
-        
+
             frame = raw.iloc[header_row + 1:].copy()
             frame.columns = [
                 str(value).strip()
                 for value in raw.iloc[header_row].tolist()
             ]
-        
+
             frame = frame.dropna(how="all")
-        
+
             def acm_column(code):
                 for column in frame.columns:
                     if normalise_column(column) == code:
                         return column
-        
+
                 raise RuntimeError(
                     f"ACM Daily worksheet does not have column {code}. "
                     f"Columns found: {list(frame.columns)}"
                 )
-        
+
             date_column = acm_column("date")
-        
+
             y2_column = acm_column("acmy02")
             y5_column = acm_column("acmy05")
             y10_column = acm_column("acmy10")
-        
+
             tp2_column = acm_column("acmtp02")
             tp5_column = acm_column("acmtp05")
             tp10_column = acm_column("acmtp10")
-        
+
             rows = []
-        
+
             for _, record in frame.iterrows():
                 date = to_iso_date(record[date_column])
-        
+
                 if not date:
                     continue
-        
+
                 y2 = as_number(record[y2_column])
                 y5 = as_number(record[y5_column])
                 y10 = as_number(record[y10_column])
-        
+
                 tp2 = as_number(record[tp2_column])
                 tp5 = as_number(record[tp5_column])
                 tp10 = as_number(record[tp10_column])
-        
+
                 rows.append({
                     "date": date,
-        
+
                     "y2": y2,
                     "y5": y5,
                     "y10": y10,
-        
+
                     "tp2": tp2,
                     "tp5": tp5,
                     "tp10": tp10,
-        
+
                     "er2": y2 - tp2 if y2 is not None and tp2 is not None else None,
                     "er5": y5 - tp5 if y5 is not None and tp5 is not None else None,
                     "er10": y10 - tp10 if y10 is not None and tp10 is not None else None
                 })
-        
+
             merged = {
                 row["date"]: row
                 for row in rows
             }
-        
+
             result = [
                 merged[date]
                 for date in sorted(merged)
             ]
-        
+
             if len(result) < 5000:
                 raise RuntimeError(
                     f"ACM Daily extraction produced only {len(result)} records. "
                     "Expected thousands of daily records; dashboard data was not replaced."
                 )
-        
+
             print(
                 f"ACM DAILY records extracted: {len(result)}; "
                 f"first: {result[0]['date']}; latest: {result[-1]['date']}"
             )
-        
+
             return result
-        
+
           # Load the existing dashboard so UST, TIPS and CDS data are retained.
-          if DATA_FILE.exists():
-              with open(DATA_FILE, "r", encoding="utf-8") as file:
-                  dashboard = json.load(file)
-          else:
-              dashboard = {
-                  "generated_at_utc": "",
-                  "sources": {},
-                  "series": {}
-              }
+          dashboard = read_existing_dashboard()
 
           dashboard.setdefault("sources", {})
           dashboard.setdefault("series", {})
@@ -537,69 +529,21 @@ jobs:
           dashboard["series"].setdefault("cds", [])
           dashboard["series"].setdefault("kw", [])
           dashboard["series"].setdefault("acm", [])
-  
 
-  
-            # Kim-Wright update.
-            kw = get_kw_data()
+          # Kim-Wright update.
+          kw = get_kw_data()
 
-            dashboard["series"]["kw"] = kw
-            
-            dashboard["sources"]["kim_wright"] = (
-                "Federal Reserve Board Kim-Wright Three-Factor Nominal Term Structure Model"
-            )
-            
-            print(
-                f"Saved Kim-Wright DAILY series: {len(kw)} records; "
-                f"latest: {kw[-1]['date']}"
-            )
-            
-            acm = get_acm_data()
-            
-            dashboard["series"]["acm"] = acm
-            
-            dashboard["sources"]["acm"] = (
-                "Federal Reserve Bank of New York ACM Daily Term Premia data"
-            )
-            
-            print(
-                f"Saved ACM DAILY series: {len(acm)} records; "
-                f"latest: {acm[-1]['date']}"
-            )
+          dashboard["series"]["kw"] = kw
 
-          dashboard["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+          dashboard["sources"]["kim_wright"] = (
+              "Federal Reserve Board Kim-Wright Three-Factor Nominal Term Structure Model"
+          )
 
-          DATA_FILE.parent.mkdir(exist_ok=True)
+          print(
+              f"Saved Kim-Wright DAILY series: {len(kw)} records; "
+              f"latest: {kw[-1]['date']}"
+          )
 
-          with open(DATA_FILE, "w", encoding="utf-8") as file:
-              json.dump(dashboard, file, separators=(",", ":"))
+          acm = get_acm_data()
 
-          print("Saved updated data/dashboard.json")
-          PY
-
-      - name: Save updated dashboard data
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data/dashboard.json
-
-          if git diff --cached --quiet; then
-            echo "No model-data changes to commit."
-          else
-            git commit -m "Update Kim-Wright and ACM fitted yields"
-            git push
-          fi
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload current dashboard to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: "."
-
-      - name: Deploy refreshed dashboard
-        id: deployment
-        uses: actions/deploy-pages@v4
+          dashboard["series"]["acm"] = acm
