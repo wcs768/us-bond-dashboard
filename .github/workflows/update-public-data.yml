@@ -17,32 +17,57 @@ jobs:
       - name: Download repository files
         uses: actions/checkout@v4
 
-      - name: Download FRED Treasury and TIPS data
+      - name: Download official US Treasury yield-curve data
         shell: bash
         run: |
           set -e
 
-          FRED_URL="https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS2,DGS5,DGS10,DGS30,DFII5,DFII10,DFII30"
+          CURRENT_YEAR=$(date -u +%Y)
+          PREVIOUS_YEAR=$((CURRENT_YEAR - 1))
 
-          echo "Downloading FRED data with automatic retries..."
+          echo "Downloading US Treasury nominal and real yield curves..."
 
-          curl \
-            --http1.1 \
-            --fail \
-            --location \
-            --retry 5 \
-            --retry-delay 10 \
-            --retry-all-errors \
-            --connect-timeout 30 \
-            --max-time 300 \
-            --user-agent "Mozilla/5.0 US-Bond-Yields-Dashboard" \
-            "$FRED_URL" \
-            --output /tmp/fred_data.csv
+          download_file () {
+            URL="$1"
+            OUTPUT="$2"
 
-          echo "FRED file downloaded:"
-          wc -c /tmp/fred_data.csv
-          head -n 2 /tmp/fred_data.csv
+            curl \
+              --http1.1 \
+              --fail \
+              --location \
+              --retry 3 \
+              --retry-delay 5 \
+              --connect-timeout 30 \
+              --max-time 120 \
+              --user-agent "Mozilla/5.0" \
+              "$URL" \
+              --output "$OUTPUT"
+          }
 
+          # Nominal Treasury par-yield curve: current and previous calendar year
+          download_file \
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${CURRENT_YEAR}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${CURRENT_YEAR}&page&_format=csv" \
+            "/tmp/nominal_current.csv"
+
+          download_file \
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${PREVIOUS_YEAR}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${PREVIOUS_YEAR}&page&_format=csv" \
+            "/tmp/nominal_previous.csv"
+
+          # TIPS / Treasury real par-yield curve: current and previous calendar year
+          download_file \
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${CURRENT_YEAR}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${CURRENT_YEAR}&page&_format=csv" \
+            "/tmp/real_current.csv"
+
+          download_file \
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${PREVIOUS_YEAR}/all?type=daily_treasury_real_yield_curve&field_tdr_date_value=${PREVIOUS_YEAR}&page&_format=csv" \
+            "/tmp/real_previous.csv"
+
+          echo "Files downloaded successfully:"
+          wc -c /tmp/nominal_current.csv /tmp/nominal_previous.csv /tmp/real_current.csv /tmp/real_previous.csv
+
+      - name: Create dashboard data file
+        shell: bash
+        run: |
           python - <<'PY'
           import csv
           import json
@@ -50,9 +75,9 @@ jobs:
           from datetime import datetime, timezone
 
           def number(value):
-              value = (value or "").strip()
+              value = (value or "").strip().replace(",", "")
 
-              if value in ("", "."):
+              if value in ("", "N/A", "NA", "-"):
                   return None
 
               try:
@@ -60,37 +85,84 @@ jobs:
               except ValueError:
                   return None
 
-          with open("/tmp/fred_data.csv", "r", encoding="utf-8-sig") as file:
-              reader = csv.DictReader(file)
+          def get_value(row, possible_names):
+              """
+              Treasury occasionally changes spacing or case in CSV headers.
+              This permits multiple possible header labels.
+              """
+              normalised = {
+                  str(key).strip().lower(): value
+                  for key, value in row.items()
+              }
 
-              ust = []
-              tips = []
+              for name in possible_names:
+                  value = normalised.get(name.lower())
 
-              for row in reader:
-                  date = row.get("observation_date")
+                  if value is not None:
+                      return value
 
-                  if not date:
-                      continue
+              return None
 
-                  ust.append({
-                      "date": date,
-                      "y2": number(row.get("DGS2")),
-                      "y5": number(row.get("DGS5")),
-                      "y10": number(row.get("DGS10")),
-                      "y30": number(row.get("DGS30"))
-                  })
+          def read_treasury_csv(file_names, curve_type):
+              output = []
 
-                  tips.append({
-                      "date": date,
-                      "y5": number(row.get("DFII5")),
-                      "y10": number(row.get("DFII10")),
-                      "y30": number(row.get("DFII30"))
-                  })
+              for file_name in file_names:
+                  with open(file_name, "r", encoding="utf-8-sig") as file:
+                      reader = csv.DictReader(file)
 
-          output = {
+                      for row in reader:
+                          date = get_value(row, ["Date", "DATE", "Date (MM/DD/YYYY)"])
+
+                          if not date:
+                              continue
+
+                          try:
+                              parsed_date = datetime.strptime(date.strip(), "%m/%d/%Y")
+                              iso_date = parsed_date.strftime("%Y-%m-%d")
+                          except ValueError:
+                              continue
+
+                          if curve_type == "nominal":
+                              output.append({
+                                  "date": iso_date,
+                                  "y2": number(get_value(row, ["2 Yr", "2-year", "2 Year"])),
+                                  "y5": number(get_value(row, ["5 Yr", "5-year", "5 Year"])),
+                                  "y10": number(get_value(row, ["10 Yr", "10-year", "10 Year"])),
+                                  "y30": number(get_value(row, ["30 Yr", "30-year", "30 Year"]))
+                              })
+
+                          if curve_type == "real":
+                              output.append({
+                                  "date": iso_date,
+                                  "y5": number(get_value(row, ["5 Yr", "5-year", "5 Year"])),
+                                  "y10": number(get_value(row, ["10 Yr", "10-year", "10 Year"])),
+                                  "y30": number(get_value(row, ["30 Yr", "30-year", "30 Year"]))
+                              })
+
+              # Merge duplicate dates and sort them.
+              merged = {row["date"]: row for row in output}
+              return [merged[date] for date in sorted(merged)]
+
+          ust = read_treasury_csv(
+              ["/tmp/nominal_previous.csv", "/tmp/nominal_current.csv"],
+              "nominal"
+          )
+
+          tips = read_treasury_csv(
+              ["/tmp/real_previous.csv", "/tmp/real_current.csv"],
+              "real"
+          )
+
+          if not ust:
+              raise RuntimeError("No nominal Treasury data was extracted.")
+
+          if not tips:
+              raise RuntimeError("No TIPS real-yield data was extracted.")
+
+          dashboard = {
               "generated_at_utc": datetime.now(timezone.utc).isoformat(),
               "sources": {
-                  "ust_tips": "Federal Reserve H.15 via FRED",
+                  "ust_tips": "US Department of the Treasury daily par yield curves",
                   "kim_wright": "Not yet automated",
                   "acm": "Not yet automated",
                   "cds": "Not configured"
@@ -107,9 +179,9 @@ jobs:
           os.makedirs("data", exist_ok=True)
 
           with open("data/dashboard.json", "w", encoding="utf-8") as file:
-              json.dump(output, file, separators=(",", ":"))
+              json.dump(dashboard, file, separators=(",", ":"))
 
-          print(f"Saved {len(ust)} UST records and {len(tips)} TIPS records.")
+          print(f"Created dashboard.json with {len(ust)} UST and {len(tips)} TIPS records.")
           PY
 
       - name: Save updated data to repository
@@ -123,6 +195,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else
-            git commit -m "Update Treasury and TIPS dashboard data"
+            git commit -m "Update UST and TIPS dashboard data"
             git push
           fi
