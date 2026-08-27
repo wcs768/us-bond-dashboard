@@ -582,103 +582,96 @@
 
     function createModelChart(model) {
       const canvas = document.getElementById(`${model}-chart`);
-
+    
       charts[model] = new Chart(canvas, {
+        type: "bar",
+    
         data: {
           labels: [],
           datasets: []
         },
-
+    
         options: {
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-
+    
           interaction: {
             mode: "index",
             intersect: false
           },
-
+    
           plugins: {
             legend: {
               position: "top",
               align: "end"
             },
-
+    
             tooltip: {
               callbacks: {
                 title(items) {
                   return items.length ? formatDate(items[0].label) : "";
                 },
-
+    
                 label(context) {
                   if (context.parsed.y === null) {
                     return `${context.dataset.label}: —`;
                   }
-
-                  const suffix = context.dataset.yAxisID === "premiumAxis"
-                    ? "% term premium"
-                    : "%";
-
-                  return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}${suffix}`;
+    
+                  return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}%`;
                 },
-
+    
                 afterBody(items) {
                   if (!items.length) {
                     return "";
                   }
-
-                  const row = items[0].chart.$modelRows[items[0].dataIndex];
-
+    
+                  const row =
+                    items[0].chart.$modelRows[items[0].dataIndex];
+    
                   if (!row) {
                     return "";
                   }
-
+    
                   return [
                     "",
-                    "Identity:",
-                    "Expected-rate component + term premium",
-                    "= fitted zero-coupon yield"
+                    `Expected-rate component: ${row.expected.toFixed(2)}%`,
+                    `Term premium: ${row.premium.toFixed(2)}%`,
+                    `Fitted yield: ${row.fitted.toFixed(2)}%`,
+                    "",
+                    "Expected rate + term premium = fitted yield"
                   ];
                 }
               }
             }
           },
-
+    
           scales: {
             x: {
-              grid: { display: false },
+              stacked: true,
+              grid: {
+                display: false
+              },
               ticks: {
                 maxTicksLimit: 8,
-                font: { size: 11 }
+                font: {
+                  size: 11
+                }
               }
             },
-
-            rateAxis: {
-              position: "left",
-
+    
+            y: {
+              stacked: true,
+    
               title: {
                 display: true,
-                text: "Yield / expected-rate component (%)"
+                text: "Percent (%)"
               },
-
+    
               grid: {
                 color: "rgba(102,112,133,.14)"
-              }
-            },
-
-            premiumAxis: {
-              position: "right",
-
-              title: {
-                display: true,
-                text: "Term premium (%)"
               },
-
-              grid: {
-                drawOnChartArea: false
-              },
-
+    
               ticks: {
                 callback(value) {
                   return `${value}%`;
@@ -688,7 +681,7 @@
           }
         }
       });
-    }
+}
 
     function modelRows(model, tenor) {
       const records = dashboardData.series[model] || [];
@@ -728,79 +721,101 @@
     function updateModelChart(model) {
       const tenor = selectedTenors[model];
       const chart = charts[model];
+    
       const rows = filterByRange(modelRows(model, tenor));
-
+    
       chart.$modelRows = rows;
+    
       chart.data.labels = rows.map(row => row.date);
-
-      /*
-        This is deliberately NOT a normal stacked-area chart.
-
-        A conventional stacked chart cannot correctly show a negative
-        term premium without visually overlapping the expected-rate
-        component. Therefore:
-
-        - expected rate and fitted yield use the left axis;
-        - term premium uses a separate right axis;
-        - negative term-premium bars extend below the zero line.
-      */
+    
       chart.data.datasets = [
+        {
+          type: "bar",
+          label: "Expected-rate component",
+          data: rows.map(row => row.expected),
+    
+          /*
+            Both bar datasets have the same stack identifier.
+            Positive term premiums appear above expected rates.
+          */
+          stack: "components",
+    
+          backgroundColor: "rgba(31,111,235,.70)",
+          borderColor: "#1f6feb",
+          borderWidth: 1,
+    
+          borderRadius: 1,
+          order: 2
+        },
+    
         {
           type: "bar",
           label: "Term premium",
           data: rows.map(row => row.premium),
-          yAxisID: "premiumAxis",
+    
+          /*
+            Negative values use the same axis and extend below zero.
+            Chart.js correctly separates positive and negative stacks.
+          */
+          stack: "components",
+    
           backgroundColor(context) {
             const value = context.raw;
+    
             return value >= 0
-              ? "rgba(239,139,44,.72)"
-              : "rgba(194,65,75,.72)";
+              ? "rgba(239,139,44,.74)"
+              : "rgba(194,65,75,.74)";
           },
+    
           borderColor(context) {
             const value = context.raw;
-            return value >= 0 ? "#ef8b2c" : "#c2414b";
+    
+            return value >= 0
+              ? "#ef8b2c"
+              : "#c2414b";
           },
+    
           borderWidth: 1,
-          borderRadius: 2,
+          borderRadius: 1,
           order: 1
         },
-
-        {
-          type: "line",
-          label: "Expected-rate component",
-          data: rows.map(row => row.expected),
-          yAxisID: "rateAxis",
-          borderColor: "#1f6feb",
-          backgroundColor: "#1f6feb",
-          borderWidth: 2,
-          tension: 0,
-          pointRadius: model === "kw" ? 1.5 : 0,
-          pointHoverRadius: 4,
-          order: 2
-        },
-
+    
         {
           type: "line",
           label: "Fitted zero-coupon yield",
           data: rows.map(row => row.fitted),
-          yAxisID: "rateAxis",
+    
+          /*
+            Different stack name prevents the fitted-yield line
+            from being added to the stacked-bar totals.
+          */
+          stack: "fitted-line",
+    
           borderColor: "#172033",
           backgroundColor: "#172033",
           borderWidth: 2.5,
+    
           tension: 0,
+    
+          /*
+            Daily Kim-Wright observations are shown as individual
+            dots; ACM uses a clean line because it has fewer points.
+          */
           pointRadius: model === "kw" ? 1.5 : 0,
           pointHoverRadius: 4,
+    
+          fill: false,
           order: 3
         }
       ];
-
+    
       chart.update();
-
+    
       const modelName = model === "kw" ? "Kim–Wright" : "ACM";
-
+    
       document.getElementById(`${model}-title`).textContent =
         `${modelName} ${tenor}Y Yield Components`;
-
+    
       document.getElementById(`${model}-date`).textContent = rows.length
         ? `Last: ${formatDate(rows[rows.length - 1].date)}`
         : "Component data unavailable";
