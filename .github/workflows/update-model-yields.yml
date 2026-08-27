@@ -42,7 +42,7 @@ jobs:
 
       - name: Install data-processing packages
         run: |
-          pip install pandas openpyxl
+          pip install pandas openpyxl xlrd
 
       - name: Download Kim-Wright and ACM daily model data
         shell: bash
@@ -389,22 +389,94 @@ jobs:
 
           def get_acm_data():
               """
-              Download the NY Fed ACM workbook and explicitly parse
+              Download the official NY Fed ACM workbook and explicitly use
               the 'ACM Daily' worksheet.
 
-              This deliberately does NOT use 'ACM Monthly'.
-              """
-              print(f"Downloading ACM workbook: {ACM_XLSX_URL}")
+              The NY Fed file can be served either as:
+              - XLSX (ZIP container: starts with PK), or
+              - legacy XLS (OLE container: starts with D0 CF 11 E0).
 
-              workbook_bytes = download(ACM_XLSX_URL)
+              This function supports both file formats and will give a clear
+              error if the server returns an HTML page instead of a workbook.
+              """
+              acm_urls = [
+                  (
+                      "https://www.newyorkfed.org/medialibrary/media/"
+                      "research/data_indicators/ACMTermPremium.xlsx"
+                  ),
+                  (
+                      "https://www.newyorkfed.org/medialibrary/media/"
+                      "research/data_indicators/ACMTermPremium.xls"
+                  )
+              ]
+
+              workbook_bytes = None
+              workbook_engine = None
+              workbook_url = None
+              invalid_responses = []
+
+              for url in acm_urls:
+                  print(f"Trying ACM workbook: {url}")
+
+                  try:
+                      candidate = download(url)
+
+                  except Exception as error:
+                      print(f"ACM download failed for {url}: {error}")
+                      continue
+
+                  # Modern .xlsx files are ZIP containers.
+                  if candidate[:2] == b"PK":
+                      workbook_bytes = candidate
+                      workbook_engine = "openpyxl"
+                      workbook_url = url
+
+                      print("ACM file type detected: XLSX")
+                      break
+
+                  # Legacy .xls files are OLE Compound Documents.
+                  if candidate[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                      workbook_bytes = candidate
+                      workbook_engine = "xlrd"
+                      workbook_url = url
+
+                      print("ACM file type detected: XLS")
+                      break
+
+                  preview = candidate[:300].decode(
+                      "utf-8",
+                      errors="replace"
+                  ).replace("\n", " ")
+
+                  invalid_responses.append(
+                      f"URL: {url}; first bytes: {preview}"
+                  )
+
+                  print(
+                      "Downloaded ACM response is not an Excel workbook. "
+                      f"Preview: {preview}"
+                  )
+
+              if workbook_bytes is None:
+                  raise RuntimeError(
+                      "Could not obtain a valid ACM Excel workbook. "
+                      "The NY Fed server may have returned HTML instead. "
+                      + " | ".join(invalid_responses)
+                  )
+
+              print(
+                  f"Opening ACM workbook from {workbook_url} "
+                  f"using {workbook_engine}"
+              )
 
               excel = pd.ExcelFile(
                   io.BytesIO(workbook_bytes),
-                  engine="openpyxl"
+                  engine=workbook_engine
               )
 
               print(f"ACM workbook worksheets: {excel.sheet_names}")
 
+              # Explicitly select ACM Daily, never ACM Monthly.
               daily_sheet = next(
                   (
                       sheet
@@ -416,14 +488,14 @@ jobs:
 
               if daily_sheet is None:
                   raise RuntimeError(
-                      "Cannot find worksheet named 'ACM Daily'. "
+                      "Cannot find the 'ACM Daily' worksheet. "
                       f"Available worksheets: {excel.sheet_names}"
                   )
 
               print(f"Using ACM daily worksheet: {daily_sheet}")
 
-              # Read raw cells first because the sheet can contain title rows
-              # before the row containing the true column names.
+              # Read raw worksheet first because the actual header may not
+              # be the first worksheet row.
               raw = pd.read_excel(
                   excel,
                   sheet_name=daily_sheet,
@@ -434,35 +506,35 @@ jobs:
 
               header_row = None
 
+              required_headers = {
+                  "date",
+                  "acmy02",
+                  "acmy05",
+                  "acmy10",
+                  "acmtp02",
+                  "acmtp05",
+                  "acmtp10"
+              }
+
               for row_number in range(min(40, len(raw))):
                   candidate_headers = [
                       str(value).strip()
                       for value in raw.iloc[row_number].tolist()
                   ]
 
-                  normalised_headers = [
+                  normalised_headers = {
                       normalise_column(value)
                       for value in candidate_headers
-                  ]
-
-                  required_headers = {
-                      "date",
-                      "acmy02",
-                      "acmy05",
-                      "acmy10",
-                      "acmtp02",
-                      "acmtp05",
-                      "acmtp10"
                   }
 
-                  if required_headers.issubset(set(normalised_headers)):
+                  if required_headers.issubset(normalised_headers):
                       header_row = row_number
                       break
 
               if header_row is None:
                   raise RuntimeError(
-                      "Could not locate the required Date, ACMY02/05/10 "
-                      "and ACMTP02/05/10 header row in ACM Daily."
+                      "Could not find Date, ACMY02/05/10 and "
+                      "ACMTP02/05/10 headers in the ACM Daily worksheet."
                   )
 
               print(f"ACM Daily header row: {header_row}")
@@ -528,6 +600,7 @@ jobs:
                       "er10": y10 - tp10 if y10 is not None and tp10 is not None else None
                   })
 
+              # Keep one observation per calendar day, ordered oldest first.
               merged = {
                   row["date"]: row
                   for row in rows
@@ -538,12 +611,10 @@ jobs:
                   for date in sorted(merged)
               ]
 
-              # ACM Daily data should contain many thousands of observations.
               if len(result) < 5000:
                   raise RuntimeError(
                       f"ACM Daily extraction produced only {len(result)} records. "
-                      "Expected thousands of daily records. "
-                      "Existing dashboard data was not overwritten."
+                      "Expected thousands of daily records."
                   )
 
               print(
