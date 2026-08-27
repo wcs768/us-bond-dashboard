@@ -27,6 +27,7 @@ jobs:
           echo "Downloading FRED data with automatic retries..."
 
           curl \
+            --http1.1 \
             --fail \
             --location \
             --retry 5 \
