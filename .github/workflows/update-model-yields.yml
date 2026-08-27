@@ -231,12 +231,44 @@ jobs:
 
               csv_bytes = download(KW_CSV_URL)
 
-              # sep=None allows comma or semicolon detection automatically.
+              # The Fed CSV contains introductory metadata rows before the
+              # actual header row beginning with Date. Find the true header
+              # before passing the remaining file to pandas.
+              csv_text = csv_bytes.decode(
+                  "utf-8-sig",
+                  errors="replace"
+              )
+
+              csv_lines = csv_text.splitlines()
+
+              header_index = next(
+                  (
+                      index
+                      for index, line in enumerate(csv_lines)
+                      if (
+                          line.strip().lower().startswith("date,")
+                          and "THREEFY0200.B" in line
+                      )
+                  ),
+                  None
+              )
+
+              if header_index is None:
+                  raise RuntimeError(
+                      "Could not find the Date header in the Kim-Wright CSV. "
+                      f"First 10 lines: {csv_lines[:10]}"
+                  )
+
+              print(
+                  f"Kim-Wright CSV header found on source line "
+                  f"{header_index + 1}"
+              )
+
+              # Read only from the actual Date header onwards.
               frame = pd.read_csv(
-                  io.BytesIO(csv_bytes),
-                  encoding="utf-8-sig",
-                  sep=None,
-                  engine="python"
+                  io.StringIO("\n".join(csv_lines[header_index:])),
+                  sep=",",
+                  encoding="utf-8"
               )
 
               frame.columns = [
