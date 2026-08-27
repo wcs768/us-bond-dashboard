@@ -20,61 +20,71 @@ jobs:
       - name: Download FRED Treasury and TIPS data
         shell: bash
         run: |
+          set -e
+
+          FRED_URL="https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS2,DGS5,DGS10,DGS30,DFII5,DFII10,DFII30"
+
+          echo "Downloading FRED data with automatic retries..."
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 10 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 300 \
+            --user-agent "Mozilla/5.0 US-Bond-Yields-Dashboard" \
+            "$FRED_URL" \
+            --output /tmp/fred_data.csv
+
+          echo "FRED file downloaded:"
+          wc -c /tmp/fred_data.csv
+          head -n 2 /tmp/fred_data.csv
+
           python - <<'PY'
           import csv
-          import io
           import json
           import os
-          import urllib.request
           from datetime import datetime, timezone
-
-          url = (
-              "https://fred.stlouisfed.org/graph/fredgraph.csv"
-              "?id=DGS2,DGS5,DGS10,DGS30,DFII5,DFII10,DFII30"
-          )
-
-          request = urllib.request.Request(
-              url,
-              headers={"User-Agent": "Mozilla/5.0"}
-          )
-
-          with urllib.request.urlopen(request, timeout=60) as response:
-              text = response.read().decode("utf-8")
 
           def number(value):
               value = (value or "").strip()
+
               if value in ("", "."):
                   return None
+
               try:
                   return float(value)
               except ValueError:
                   return None
 
-          reader = csv.DictReader(io.StringIO(text))
+          with open("/tmp/fred_data.csv", "r", encoding="utf-8-sig") as file:
+              reader = csv.DictReader(file)
 
-          ust = []
-          tips = []
+              ust = []
+              tips = []
 
-          for row in reader:
-              date = row.get("observation_date")
+              for row in reader:
+                  date = row.get("observation_date")
 
-              if not date:
-                  continue
+                  if not date:
+                      continue
 
-              ust.append({
-                  "date": date,
-                  "y2": number(row.get("DGS2")),
-                  "y5": number(row.get("DGS5")),
-                  "y10": number(row.get("DGS10")),
-                  "y30": number(row.get("DGS30"))
-              })
+                  ust.append({
+                      "date": date,
+                      "y2": number(row.get("DGS2")),
+                      "y5": number(row.get("DGS5")),
+                      "y10": number(row.get("DGS10")),
+                      "y30": number(row.get("DGS30"))
+                  })
 
-              tips.append({
-                  "date": date,
-                  "y5": number(row.get("DFII5")),
-                  "y10": number(row.get("DFII10")),
-                  "y30": number(row.get("DFII30"))
-              })
+                  tips.append({
+                      "date": date,
+                      "y5": number(row.get("DFII5")),
+                      "y10": number(row.get("DFII10")),
+                      "y30": number(row.get("DFII30"))
+                  })
 
           output = {
               "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -98,10 +108,7 @@ jobs:
           with open("data/dashboard.json", "w", encoding="utf-8") as file:
               json.dump(output, file, separators=(",", ":"))
 
-          print(
-              f"Saved {len(ust)} nominal Treasury and "
-              f"{len(tips)} TIPS observations."
-          )
+          print(f"Saved {len(ust)} UST records and {len(tips)} TIPS records.")
           PY
 
       - name: Save updated data to repository
