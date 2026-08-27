@@ -464,9 +464,27 @@
     }
 
     function asNumber(value) {
-      const number = Number(value);
-      return Number.isFinite(number) ? number : null;
-    }
+  /*
+    JSON null must remain null.
+
+    Number(null) returns 0 in JavaScript, which previously caused
+    unavailable observations to appear as a false zero on the chart.
+  */
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    value === "N/A" ||
+    value === "NA" ||
+    value === "."
+  ) {
+    return null;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
 
     function filterByRange(rows) {
       if (!rows.length || selectedRange === "MAX") {
