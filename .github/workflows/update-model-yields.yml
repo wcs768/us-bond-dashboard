@@ -115,6 +115,12 @@ jobs:
               except (ValueError, TypeError):
                   return None
 
+          def difference(left, right):
+              if left is None or right is None:
+                  return None
+
+              return left - right
+
           def to_iso_date(value, dayfirst=False):
               date = pd.to_datetime(value, errors="coerce", dayfirst=dayfirst)
 
@@ -180,11 +186,16 @@ jobs:
                       table.columns = flatten_columns(table.columns)
                       columns = list(table.columns)
 
-                      if (
-                          "THREEFY0200.B" not in columns
-                          or "THREEFY0500.B" not in columns
-                          or "THREEFY1000.B" not in columns
-                      ):
+                      required_kw_columns = [
+                          "THREEFY0200.B",
+                          "THREEFY0500.B",
+                          "THREEFY1000.B",
+                          "THREEFYTP0200.B",
+                          "THREEFYTP0500.B",
+                          "THREEFYTP1000.B"
+                      ]
+
+                      if not all(column in columns for column in required_kw_columns):
                           continue
 
                       date_column = next(
@@ -198,12 +209,29 @@ jobs:
                       for _, record in table.iterrows():
                           date = to_iso_date(record[date_column], dayfirst=True)
 
-                          if date:
+                      if date:
+                              y2 = as_number(record["THREEFY0200.B"])
+                              y5 = as_number(record["THREEFY0500.B"])
+                              y10 = as_number(record["THREEFY1000.B"])
+
+                              tp2 = as_number(record["THREEFYTP0200.B"])
+                              tp5 = as_number(record["THREEFYTP0500.B"])
+                              tp10 = as_number(record["THREEFYTP1000.B"])
+
                               rows.append({
                                   "date": date,
-                                  "y2": as_number(record["THREEFY0200.B"]),
-                                  "y5": as_number(record["THREEFY0500.B"]),
-                                  "y10": as_number(record["THREEFY1000.B"])
+
+                                  "y2": y2,
+                                  "y5": y5,
+                                  "y10": y10,
+
+                                  "tp2": tp2,
+                                  "tp5": tp5,
+                                  "tp10": tp10,
+
+                                  "er2": difference(y2, tp2),
+                                  "er5": difference(y5, tp5),
+                                  "er10": difference(y10, tp10)
                               })
 
               merged = {row["date"]: row for row in rows}
@@ -246,6 +274,31 @@ jobs:
 
               raise RuntimeError(
                   f"Cannot find ACM fitted {tenor}Y yield column. "
+                  f"Available columns: {list(columns)}"
+              )
+
+          def find_acm_term_premium_column(columns, tenor):
+              normalised = {
+                  column: normalise_column(column)
+                  for column in columns
+              }
+
+              preferred = [
+                  f"acmtp{tenor:02d}",
+                  f"acmtp{tenor}",
+                  f"termpremium{tenor}",
+                  f"termpremium{tenor}year",
+                  f"tp{tenor}",
+                  f"tp{tenor}year"
+              ]
+
+              for target in preferred:
+                  for original, cleaned in normalised.items():
+                      if cleaned == target:
+                          return original
+
+              raise RuntimeError(
+                  f"Cannot find ACM {tenor}Y term-premium column. "
                   f"Available columns: {list(columns)}"
               )
 
@@ -312,17 +365,38 @@ jobs:
                       y5_column = find_acm_column(columns, 5)
                       y10_column = find_acm_column(columns, 10)
 
+                      tp2_column = find_acm_term_premium_column(columns, 2)
+                      tp5_column = find_acm_term_premium_column(columns, 5)
+                      tp10_column = find_acm_term_premium_column(columns, 10)
+
                       output = []
 
                       for _, record in frame.iterrows():
                           date = to_iso_date(record[date_column])
 
                           if date:
+                              y2 = as_number(record[y2_column])
+                              y5 = as_number(record[y5_column])
+                              y10 = as_number(record[y10_column])
+
+                              tp2 = as_number(record[tp2_column])
+                              tp5 = as_number(record[tp5_column])
+                              tp10 = as_number(record[tp10_column])
+
                               output.append({
                                   "date": date,
-                                  "y2": as_number(record[y2_column]),
-                                  "y5": as_number(record[y5_column]),
-                                  "y10": as_number(record[y10_column])
+
+                                  "y2": y2,
+                                  "y5": y5,
+                                  "y10": y10,
+
+                                  "tp2": tp2,
+                                  "tp5": tp5,
+                                  "tp10": tp10,
+
+                                  "er2": difference(y2, tp2),
+                                  "er5": difference(y5, tp5),
+                                  "er10": difference(y10, tp10)
                               })
 
                       merged = {row["date"]: row for row in output}
