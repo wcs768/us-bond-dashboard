@@ -57,6 +57,7 @@ jobs:
           from pathlib import Path
 
           import pandas as pd
+          from bs4 import BeautifulSoup
 
           DATA_FILE = Path("data/dashboard.json")
 
@@ -165,83 +166,160 @@ jobs:
 
           def get_kw_data():
               """
-              Kim-Wright: THREEFY0200.B / THREEFY0500.B / THREEFY1000.B
-              mean fitted zero-coupon yields at 2Y / 5Y / 10Y.
+              Download the complete official Kim-Wright CSV rather than
+              scraping the paginated HTML tables.
+
+              This prevents the dashboard from retaining only a small
+              subset of observations, such as month-end records.
               """
+              landing_page = (
+                  "https://www.federalreserve.gov/data/"
+                  "three-factor-nominal-term-structure-model.htm"
+              )
+
+              fallback_csv_url = (
+                  "https://www.federalreserve.gov/data/"
+                  "yield-curve-tables/feds200533.csv"
+              )
+
+              print("Locating official Kim-Wright CSV download link...")
+
+              csv_url = None
+
+              try:
+                  landing_html = download(landing_page).decode(
+                      "utf-8",
+                      errors="replace"
+                  )
+
+                  soup = BeautifulSoup(landing_html, "html.parser")
+
+                  for link in soup.select("a[href]"):
+                      href = link.get("href", "")
+                      text = link.get_text(" ", strip=True).lower()
+
+                      if (
+                          ".csv" in href.lower()
+                          or text == "csv"
+                          or "data: csv" in text
+                      ):
+                          if href.startswith("http"):
+                              csv_url = href
+                          else:
+                              csv_url = (
+                                  "https://www.federalreserve.gov" +
+                                  href
+                              )
+                          break
+
+              except Exception as error:
+                  print(f"Could not inspect Kim-Wright landing page: {error}")
+
+              if not csv_url:
+                  csv_url = fallback_csv_url
+
+              print(f"Downloading Kim-Wright CSV: {csv_url}")
+
+              csv_bytes = download(csv_url)
+
+              frame = pd.read_csv(
+                  io.BytesIO(csv_bytes),
+                  encoding="utf-8-sig"
+              )
+
+              frame.columns = [
+                  str(column).strip()
+                  for column in frame.columns
+              ]
+
+              required_columns = [
+                  "THREEFY0200.B",
+                  "THREEFY0500.B",
+                  "THREEFY1000.B",
+                  "THREEFYTP0200.B",
+                  "THREEFYTP0500.B",
+                  "THREEFYTP1000.B"
+              ]
+
+              date_column = next(
+                  (
+                      column for column in frame.columns
+                      if normalise_column(column) == "date"
+                  ),
+                  None
+              )
+
+              if not date_column:
+                  raise RuntimeError(
+                      "Kim-Wright CSV has no Date column. "
+                      f"Columns found: {list(frame.columns)}"
+                  )
+
+              missing = [
+                  column for column in required_columns
+                  if column not in frame.columns
+              ]
+
+              if missing:
+                  raise RuntimeError(
+                      "Kim-Wright CSV is missing required columns: "
+                      f"{missing}"
+                  )
+
               rows = []
 
-              # The official Fed history is split across numbered HTML pages.
-              for page_number in range(1, 21):
-                  url = KW_URL_TEMPLATE.format(page=page_number)
+              for _, record in frame.iterrows():
+                  # Kim-Wright source dates are normally DD-MM-YYYY.
+                  date = to_iso_date(record[date_column], dayfirst=True)
 
-                  try:
-                      html = download(url)
-                      tables = pd.read_html(io.StringIO(html.decode("utf-8", errors="replace")))
-
-                  except Exception as error:
-                      print(f"Kim-Wright page {page_number} skipped: {error}")
+                  if not date:
                       continue
 
-                  for table in tables:
-                      table.columns = flatten_columns(table.columns)
-                      columns = list(table.columns)
+                  y2 = as_number(record["THREEFY0200.B"])
+                  y5 = as_number(record["THREEFY0500.B"])
+                  y10 = as_number(record["THREEFY1000.B"])
 
-                      required_kw_columns = [
-                          "THREEFY0200.B",
-                          "THREEFY0500.B",
-                          "THREEFY1000.B",
-                          "THREEFYTP0200.B",
-                          "THREEFYTP0500.B",
-                          "THREEFYTP1000.B"
-                      ]
+                  tp2 = as_number(record["THREEFYTP0200.B"])
+                  tp5 = as_number(record["THREEFYTP0500.B"])
+                  tp10 = as_number(record["THREEFYTP1000.B"])
 
-                      if not all(column in columns for column in required_kw_columns):
-                          continue
+                  rows.append({
+                      "date": date,
 
-                      date_column = next(
-                          (column for column in columns if normalise_column(column) == "date"),
-                          None
-                      )
+                      "y2": y2,
+                      "y5": y5,
+                      "y10": y10,
 
-                      if not date_column:
-                          continue
+                      "tp2": tp2,
+                      "tp5": tp5,
+                      "tp10": tp10,
 
-                      for _, record in table.iterrows():
-                          date = to_iso_date(record[date_column], dayfirst=True)
+                      "er2": difference(y2, tp2),
+                      "er5": difference(y5, tp5),
+                      "er10": difference(y10, tp10)
+                  })
 
-                      if date:
-                              y2 = as_number(record["THREEFY0200.B"])
-                              y5 = as_number(record["THREEFY0500.B"])
-                              y10 = as_number(record["THREEFY1000.B"])
+              # Remove duplicate dates, retain chronological order.
+              merged = {
+                  row["date"]: row
+                  for row in rows
+              }
 
-                              tp2 = as_number(record["THREEFYTP0200.B"])
-                              tp5 = as_number(record["THREEFYTP0500.B"])
-                              tp10 = as_number(record["THREEFYTP1000.B"])
-
-                              rows.append({
-                                  "date": date,
-
-                                  "y2": y2,
-                                  "y5": y5,
-                                  "y10": y10,
-
-                                  "tp2": tp2,
-                                  "tp5": tp5,
-                                  "tp10": tp10,
-
-                                  "er2": difference(y2, tp2),
-                                  "er5": difference(y5, tp5),
-                                  "er10": difference(y10, tp10)
-                              })
-
-              merged = {row["date"]: row for row in rows}
-
-              result = [merged[date] for date in sorted(merged)]
+              result = [
+                  merged[date]
+                  for date in sorted(merged)
+              ]
 
               if not result:
                   raise RuntimeError(
-                      "No Kim-Wright fitted-yield records were extracted."
+                      "No Kim-Wright records were extracted from the CSV."
                   )
+
+              print(
+                  f"Kim-Wright CSV records extracted: {len(result)}; "
+                  f"first: {result[0]['date']}; "
+                  f"latest: {result[-1]['date']}"
+              )
 
               return result
 
