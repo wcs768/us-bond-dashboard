@@ -1,0 +1,16 @@
+{
+  "generated_at_utc": "2026-08-27T00:00:00Z",
+  "sources": {
+    "ust_tips": "Federal Reserve H.15 via FRED",
+    "kim_wright": "Federal Reserve Board",
+    "acm": "Federal Reserve Bank of New York",
+    "cds": "Not configured"
+  },
+  "series": {
+    "ust": [],
+    "tips": [],
+    "cds": [],
+    "kw": [],
+    "acm": []
+  }
+}
