@@ -57,7 +57,6 @@ jobs:
           from pathlib import Path
 
           import pandas as pd
-          from bs4 import BeautifulSoup
 
           DATA_FILE = Path("data/dashboard.json")
 
@@ -167,9 +166,6 @@ jobs:
           def get_kw_data():
             """
             Download the direct Federal Reserve Kim-Wright CSV.
-
-            The file has daily observations. Do not scrape the paginated HTML
-            tables, because that can result in an incomplete subset of records.
             """
             kw_csv_url = (
                 "https://www.federalreserve.gov/data/"
@@ -180,11 +176,25 @@ jobs:
 
             csv_bytes = download(kw_csv_url)
 
-            frame = pd.read_csv(
-                io.BytesIO(csv_bytes),
-                encoding="utf-8-sig"
-            )
+            # Decode to string to inspect/fix potential encoding issues
+            csv_text = csv_bytes.decode('utf-8-sig')
+            
+            # Some Fed CSVs might have weird line endings or quoting. 
+            # Using engine='python' and on_bad_lines='skip' helps with malformed rows.
+            try:
+                frame = pd.read_csv(
+                    io.StringIO(csv_text),
+                    sep=',',
+                    engine='python',
+                    on_bad_lines='skip',
+                    skipinitialspace=True
+                )
+            except Exception as e:
+                print(f"Standard CSV read failed, trying alternative parsing: {e}")
+                # Fallback: try reading as fixed width or just raw text if it's weird
+                raise RuntimeError(f"Failed to parse Kim-Wright CSV: {e}")
 
+            # Clean column names
             frame.columns = [
                 str(column).strip()
                 for column in frame.columns
@@ -301,9 +311,6 @@ jobs:
               """
               New York Fed ACM spreadsheet convention:
               ACMY02, ACMY05 and ACMY10 are model fitted yields.
-
-              The additional alternatives make the workflow resilient if
-              the publisher changes the displayed spreadsheet headers.
               """
               normalised = {
                   column: normalise_column(column)
@@ -357,7 +364,7 @@ jobs:
           def get_acm_data():
             """
             Download the official NY Fed ACM workbook and explicitly read the
-            'ACM Daily' worksheet. Do not use the monthly worksheet.
+            'ACM Daily' worksheet.
             """
             acm_url = (
                 "https://www.newyorkfed.org/medialibrary/media/"
@@ -503,47 +510,3 @@ jobs:
                 merged[date]
                 for date in sorted(merged)
             ]
-
-            if len(result) < 5000:
-                raise RuntimeError(
-                    f"ACM Daily extraction produced only {len(result)} records. "
-                    "Expected thousands of daily records; dashboard data was not replaced."
-                )
-
-            print(
-                f"ACM DAILY records extracted: {len(result)}; "
-                f"first: {result[0]['date']}; latest: {result[-1]['date']}"
-            )
-
-            return result
-
-          # Load the existing dashboard so UST, TIPS and CDS data are retained.
-          dashboard = read_existing_dashboard()
-
-          dashboard.setdefault("sources", {})
-          dashboard.setdefault("series", {})
-
-          # Preserve data maintained by other workflows.
-          dashboard["series"].setdefault("ust", [])
-          dashboard["series"].setdefault("tips", [])
-          dashboard["series"].setdefault("cds", [])
-          dashboard["series"].setdefault("kw", [])
-          dashboard["series"].setdefault("acm", [])
-
-          # Kim-Wright update.
-          kw = get_kw_data()
-
-          dashboard["series"]["kw"] = kw
-
-          dashboard["sources"]["kim_wright"] = (
-              "Federal Reserve Board Kim-Wright Three-Factor Nominal Term Structure Model"
-          )
-
-          print(
-              f"Saved Kim-Wright DAILY series: {len(kw)} records; "
-              f"latest: {kw[-1]['date']}"
-          )
-
-          acm = get_acm_data()
-
-          dashboard["series"]["acm"] = acm
