@@ -67,6 +67,51 @@ jobs:
           echo "Downloaded files:"
           ls -lh /tmp/treasury-data/
 
+      - name: Download U.S. sovereign CDS historical data from Investing.com
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -e
+
+          mkdir -p /tmp/cds-data
+
+          download_cds () {
+            TENOR="$1"
+            INSTRUMENT_ID="$2"
+            OUTPUT="/tmp/cds-data/${TENOR}.json"
+
+            URL="https://api.investing.com/api/financialdata/historical/${INSTRUMENT_ID}?start-date=2016-01-01&end-date=$(date -u +%Y-%m-%d)&time-frame=Daily&add-missing-rows=false"
+
+            echo "Downloading U.S. ${TENOR} CDS (Investing.com instrument ${INSTRUMENT_ID})..."
+
+            curl \
+              --http1.1 \
+              --fail \
+              --location \
+              --retry 4 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              --connect-timeout 30 \
+              --max-time 180 \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" \
+              -H "accept: application/json, text/plain, */*" \
+              -H "content-type: application/json" \
+              -H "domain-id: www" \
+              -H "origin: https://www.investing.com" \
+              -H "referer: https://www.investing.com/" \
+              "$URL" \
+              --output "$OUTPUT"
+
+            python -c 'import json, pathlib, sys; p=pathlib.Path(sys.argv[1]); obj=json.loads(p.read_text(encoding="utf-8")); assert isinstance(obj,(list,dict)), "Unexpected Investing.com CDS response type"; print(f"Saved {p} ({p.stat().st_size:,} bytes)")' "$OUTPUT"
+          }
+
+          download_cds "2Y" "1115803" || echo "WARNING: 2Y CDS download failed; existing CDS data will be preserved."
+          download_cds "5Y" "1115808" || echo "WARNING: 5Y CDS download failed; existing CDS data will be preserved."
+          download_cds "10Y" "1115802" || echo "WARNING: 10Y CDS download failed; existing CDS data will be preserved."
+
+          echo "CDS files:"
+          ls -lh /tmp/cds-data/ || true
+
       - name: Create 10-year dashboard data file
         shell: bash
         run: |
@@ -115,6 +160,121 @@ jobs:
                       pass
 
               return None
+
+          CDS_FILES = {
+              "y2": "/tmp/cds-data/2Y.json",
+              "y5": "/tmp/cds-data/5Y.json",
+              "y10": "/tmp/cds-data/10Y.json",
+          }
+
+          def convert_timestamp(value):
+              """Convert common Investing.com timestamps/dates to YYYY-MM-DD."""
+              if value is None:
+                  return None
+
+              if isinstance(value, (int, float)) and not isinstance(value, bool):
+                  # Investing.com chart timestamps are milliseconds since Unix epoch.
+                  try:
+                      return datetime.fromtimestamp(value / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                  except (OverflowError, OSError, ValueError):
+                      return None
+
+              text = str(value).strip()
+
+              if not text:
+                  return None
+
+              # Common API date formats.
+              for fmt in (
+                  "%Y-%m-%d",
+                  "%Y-%m-%dT%H:%M:%S",
+                  "%Y-%m-%dT%H:%M:%S.%f",
+                  "%d-%m-%Y",
+                  "%m/%d/%Y",
+              ):
+                  try:
+                      return datetime.strptime(text[:26], fmt).strftime("%Y-%m-%d")
+                  except ValueError:
+                      pass
+
+              try:
+                  return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+              except ValueError:
+                  return None
+
+          def cds_close_value(item):
+              """Extract the daily mid/close spread from an Investing.com row."""
+              if isinstance(item, dict):
+                  for key in (
+                      "price_close", "close", "price", "last", "value",
+                  ):
+                      if key in item:
+                          value = number(str(item[key]))
+                          if value is not None:
+                              return value
+                  return None
+
+              if isinstance(item, (list, tuple)):
+                  # Historical-data endpoints commonly return:
+                  # [timestamp, open, high, low, close, volume, ...]
+                  for index in (4, 1, 0):
+                      if len(item) > index:
+                          value = item[index]
+                          numeric = number(str(value))
+                          if numeric is not None:
+                              return numeric
+
+              return None
+
+          def read_cds_file(path):
+              """Read one Investing.com historical series into date/value pairs."""
+              if not os.path.exists(path):
+                  return {}
+
+              with open(path, "r", encoding="utf-8") as file:
+                  payload = json.load(file)
+
+              if isinstance(payload, dict):
+                  rows = payload.get("data", payload.get("historical", payload.get("results", [])))
+              else:
+                  rows = payload
+
+              if not isinstance(rows, list):
+                  raise RuntimeError(f"Unexpected CDS row container in {path}")
+
+              values = {}
+
+              for item in rows:
+                  if isinstance(item, dict):
+                      raw_date = item.get("date", item.get("timestamp", item.get("time")))
+                  elif isinstance(item, (list, tuple)) and item:
+                      raw_date = item[0]
+                  else:
+                      continue
+
+                  date_value = convert_timestamp(raw_date)
+                  close = cds_close_value(item)
+
+                  if date_value and close is not None:
+                      values[date_value] = close
+
+              return values
+
+          def read_cds_data():
+              """Merge the 2Y, 5Y and 10Y Investing.com CDS histories by date."""
+              by_date = {}
+
+              for field, path in CDS_FILES.items():
+                  values = read_cds_file(path)
+                  for obs_date, value in values.items():
+                      by_date.setdefault(obs_date, {})[field] = value
+
+                  print(f"Parsed {field} CDS observations: {len(values):,}")
+
+              return [
+                  {"date": obs_date, **by_date[obs_date]}
+                  for obs_date in sorted(by_date)
+              ]
 
           def read_curve_files(file_pattern, curve_type):
               observations = []
@@ -171,6 +331,13 @@ jobs:
               "real"
           )
 
+          cds_files_complete = all(
+              os.path.exists(path)
+              for path in CDS_FILES.values()
+          )
+
+          cds = read_cds_data()
+
           if not ust:
               raise RuntimeError("No nominal Treasury observations were extracted.")
 
@@ -195,10 +362,22 @@ jobs:
           dashboard["series"]["ust"] = ust
           dashboard["series"]["tips"] = tips
 
-          # Preserve data created by the other workflows.
-          dashboard["series"].setdefault("cds", [])
+          # Preserve model data created by the other workflow.
           dashboard["series"].setdefault("kw", [])
           dashboard["series"].setdefault("acm", [])
+
+          # Replace the stored CDS history only when all three Investing.com
+          # source files were fetched and parsed. A partial source outage must
+          # never erase the other CDS tenors from the dashboard.
+          if cds_files_complete and cds:
+              dashboard["sources"]["cds"] = (
+                  "Investing.com historical financial data API: U.S. sovereign CDS "
+                  "2Y (1115803), 5Y (1115808), 10Y (1115802), daily mid/close spread"
+              )
+              dashboard["series"]["cds"] = cds
+          else:
+              dashboard["series"].setdefault("cds", [])
+              dashboard["sources"].setdefault("cds", "Investing.com U.S. sovereign CDS historical data")
 
           dashboard["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
 
@@ -212,7 +391,12 @@ jobs:
           print(f"Latest UST observation:  {ust[-1]['date']}")
           print(f"Created dashboard.json with {len(tips)} TIPS records.")
           print(f"Latest TIPS observation: {tips[-1]['date']}")
-          print("Kim-Wright / ACM / CDS data, if present, were preserved.")
+          print(
+              f"Stored {len(cds)} CDS records from Investing.com."
+              if cds_files_complete and cds
+              else "Investing.com CDS data incomplete; existing CDS data preserved."
+          )
+          print("Kim-Wright / ACM model data were preserved.")
           PY
 
       - name: Save updated data to repository
