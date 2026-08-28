@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
   schedule:
-    - cron: "0 19 * * 1-5"
+    - cron: "30 19 * * 1-6"
 
 permissions:
   contents: write
@@ -17,78 +17,59 @@ jobs:
       - name: Download repository files
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Download U.S. sovereign CDS history from Investing.com
         shell: bash
-        env:
-          # Optional fallback: store the current Investing.com __cf_bm cookie
-          # in repository Settings > Secrets and variables > Actions.
-          # The workflow strips any Set-Cookie attributes automatically.
-          INVESTING_CDS_COOKIE: ${{ secrets.INVESTING_CDS_COOKIE }}
         run: |
           set -euo pipefail
 
           CDS_END_DATE=$(date -u +%F)
           export CDS_END_DATE
 
-          mkdir -p /tmp/cds-data
-
-          # If no cookie secret is configured, leave existing CDS observations
-          # untouched instead of allowing a vendor-side access issue to erase
-          # the dashboard's last successful CDS dataset.
-          if [ -z "${INVESTING_CDS_COOKIE:-}" ]; then
-            echo "INVESTING_CDS_COOKIE is not configured; preserving existing CDS data."
-            exit 0
-          fi
+          python -m pip install --disable-pip-version-check playwright==1.55.0
+          python -m playwright install --with-deps chromium
 
           python - <<'PY'
           import json
           import os
           import re
-          import time
-          import urllib.error
-          import urllib.request
           from datetime import datetime, timezone
           from pathlib import Path
 
-          DATA_FILE = Path("data/dashboard.json")
+          from playwright.sync_api import sync_playwright
 
+          DATA_FILE = Path("data/dashboard.json")
           END_DATE = os.environ["CDS_END_DATE"]
           BASE = "https://api.investing.com/api/financialdata/historical/"
-          PARAMS = f"?start-date=2016-01-01&end-date={END_DATE}&time-frame=Daily&add-missing-rows=false"
+          PARAMS = (
+              f"?start-date=2016-01-01&end-date={END_DATE}"
+              "&time-frame=Daily&add-missing-rows=false"
+          )
 
-          URLS = {
+          SERIES = {
               "y2": {
                   "id": "1115803",
-                  "url": BASE + "1115803" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-2-years-usd-historical-data",
+                  "page": "https://www.investing.com/rates-bonds/united-states-cds-2-years-usd-historical-data",
               },
               "y5": {
                   "id": "1115808",
-                  "url": BASE + "1115808" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
+                  "page": "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
               },
               "y10": {
                   "id": "1115802",
-                  "url": BASE + "1115802" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
+                  "page": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
               },
           }
 
-          RAW_COOKIE = os.environ.get("INVESTING_CDS_COOKIE", "")
           USER_AGENT = (
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/140.0.0.0 Safari/537.36"
           )
-
-          def cookie_header(value):
-              # Accept either a plain cookie value or a complete Set-Cookie line.
-              text = value.strip()
-              if "__cf_bm=" in text:
-                  text = text.split("__cf_bm=", 1)[1]
-              return "__cf_bm=" + text.split(";", 1)[0].strip()
-
-          COOKIE = cookie_header(RAW_COOKIE)
 
           def as_number(value):
               if value is None or value == "":
@@ -102,20 +83,18 @@ jobs:
               if value is None:
                   return None
               text = str(value).strip()
-              # Investing.com commonly uses ISO UTC timestamps such as
-              # 2026-08-24T00:00:00Z in rowDateTimestamp.
-              for fmt in (
+              formats = (
                   "%Y-%m-%d",
                   "%Y-%m-%dT%H:%M:%S",
                   "%Y-%m-%dT%H:%M:%SZ",
                   "%Y-%m-%dT%H:%M:%S.%fZ",
                   "%m/%d/%Y",
-              ):
+              )
+              for fmt in formats:
                   try:
-                      return datetime.strptime(text[:19], fmt).strftime("%Y-%m-%d")
+                      return datetime.strptime(text[:26], fmt).strftime("%Y-%m-%d")
                   except ValueError:
                       pass
-              # Unix milliseconds/seconds, if the vendor supplies timestamps.
               try:
                   number = float(text)
                   if number > 1_000_000_000_000:
@@ -126,22 +105,12 @@ jobs:
 
           def rows_from_payload(payload):
               if isinstance(payload, dict):
-                  candidates = payload.get("data")
-                  if candidates is None:
-                      candidates = payload.get("items")
-                  if candidates is None:
-                      candidates = payload.get("results")
-                  if candidates is None:
-                      candidates = payload
+                  candidates = payload.get("data") or payload.get("items") or payload.get("results")
               else:
                   candidates = payload
 
               if not isinstance(candidates, list):
-                  raise RuntimeError(
-                      "Unexpected Investing.com JSON structure: "
-                      f"expected list in data/items/results, got {type(candidates).__name__}; "
-                      f"top-level keys={list(payload.keys())[:20] if isinstance(payload, dict) else 'n/a'}"
-                  )
+                  return []
 
               rows = []
               for item in candidates:
@@ -154,19 +123,9 @@ jobs:
                           or item.get("timestamp")
                           or item.get("time")
                       )
-                      value = (
-                          item.get("last_close")
-                          if item.get("last_close") is not None
-                          else item.get("close")
-                      )
+                      value = item.get("last_close")
                       if value is None:
-                          value = item.get("Close")
-                      if value is None:
-                          value = item.get("last")
-                      if value is None:
-                          value = item.get("price")
-                      if value is None:
-                          value = item.get("value")
+                          value = item.get("close") or item.get("Close") or item.get("last") or item.get("price") or item.get("value")
                   elif isinstance(item, list) and len(item) >= 2:
                       date, value = item[0], item[-1]
                   else:
@@ -176,61 +135,86 @@ jobs:
                   value = as_number(value)
                   if date and value is not None:
                       rows.append((date, value))
-
               return rows
 
-          def download(url, referer, attempts=3):
-              last_error = None
-              for attempt in range(1, attempts + 1):
-                  try:
-                      request = urllib.request.Request(
-                          url,
-                          headers={
-                              "Accept": "application/json, text/plain, */*",
-                              "Accept-Language": "en-US,en;q=0.9",
-                              "Origin": "https://www.investing.com",
-                              "Referer": referer,
-                              "User-Agent": USER_AGENT,
-                              "domain-id": "www",
-                              "Cookie": COOKIE,
-                              "Sec-Fetch-Dest": "empty",
-                              "Sec-Fetch-Mode": "cors",
-                              "Sec-Fetch-Site": "same-site",
-                          },
+          combined = {}
+
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(headless=True)
+              context = browser.new_context(
+                  user_agent=USER_AGENT,
+                  locale="en-US",
+                  viewport={"width": 1440, "height": 900},
+                  extra_http_headers={
+                      "Accept-Language": "en-US,en;q=0.9",
+                  },
+              )
+              page = context.new_page()
+              request_context = context.request
+
+              # Establish a real Investing.com browser session first.
+              # The same browser context is then used for the API requests,
+              # allowing Cloudflare/Investing.com cookies to flow naturally.
+              for field, config in SERIES.items():
+                  print(f"Opening Investing.com CDS page for {field}...")
+                  response = page.goto(
+                      config["page"],
+                      wait_until="domcontentloaded",
+                      timeout=120_000,
+                  )
+                  if response:
+                      print(f"  Page HTTP status: {response.status}")
+                  page.wait_for_timeout(5000)
+
+                  api_url = BASE + config["id"] + PARAMS
+                  print(f"Downloading CDS {field}: {api_url}")
+
+                  api_response = request_context.get(
+                      api_url,
+                      headers={
+                          "Accept": "application/json, text/plain, */*",
+                          "Origin": "https://www.investing.com",
+                          "Referer": config["page"],
+                          "domain-id": "www",
+                      },
+                      timeout=180_000,
+                  )
+
+                  print(f"  API HTTP status: {api_response.status}")
+                  body = api_response.text()
+                  if api_response.status != 200:
+                      raise RuntimeError(
+                          f"Investing.com returned HTTP {api_response.status} for {field}: "
+                          f"{body[:500]}"
                       )
 
-                      with urllib.request.urlopen(request, timeout=180) as response:
-                          body = response.read().decode("utf-8", errors="replace")
-                          if response.status != 200:
-                              raise RuntimeError(f"HTTP {response.status}")
-                          return json.loads(body)
-                  except Exception as error:
-                      last_error = error
-                      print(f"Investing.com download attempt {attempt}/{attempts} failed: {error}")
-                      if attempt < attempts:
-                          time.sleep(attempt * 10)
-              raise RuntimeError(f"Investing.com request failed after {attempts} attempts: {last_error}")
+                  try:
+                      payload = api_response.json()
+                  except Exception as exc:
+                      raise RuntimeError(
+                          f"Investing.com returned non-JSON data for {field}: {body[:500]}"
+                      ) from exc
 
-          combined = {}
-          for field, config in URLS.items():
-              print(f"Downloading CDS {field}: {config['url']}")
-              payload = download(config["url"], config["referer"])
-              rows = rows_from_payload(payload)
-              if not rows:
-                  sample_keys = []
-                  data = payload.get("data") if isinstance(payload, dict) else payload
-                  if isinstance(data, list) and data and isinstance(data[0], dict):
-                      sample_keys = list(data[0].keys())
-                  raise RuntimeError(
-                      f"No observations returned for {field}; "
-                      f"sample response keys={sample_keys}; "
-                      f"payload message={payload.get('message') if isinstance(payload, dict) else None!r}"
-                  )
-              for date, value in rows:
-                  combined.setdefault(date, {})[field] = value
-              print(f"  -> {len(rows)} observations; latest={max(date for date, _ in rows)}")
+                  rows = rows_from_payload(payload)
+                  if not rows:
+                      top_keys = list(payload.keys())[:20] if isinstance(payload, dict) else []
+                      sample_keys = []
+                      candidates = payload.get("data") if isinstance(payload, dict) else None
+                      if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+                          sample_keys = list(candidates[0].keys())
+                      message = payload.get("message") if isinstance(payload, dict) else None
+                      raise RuntimeError(
+                          f"No observations returned for {field}; "
+                          f"top-level keys={top_keys}; sample response keys={sample_keys}; "
+                          f"payload message={message!r}"
+                      )
 
-          # Commit the new CDS panel only after all 3 tenors succeeded.
+                  for date, value in rows:
+                      combined.setdefault(date, {})[field] = value
+                  print(f"  -> {len(rows)} observations; latest={max(date for date, _ in rows)}")
+
+              browser.close()
+
           cds = [
               {
                   "date": date,
@@ -244,16 +228,14 @@ jobs:
           if not cds:
               raise RuntimeError("No combined CDS observations were created")
 
-          if DATA_FILE.exists():
-              with open(DATA_FILE, "r", encoding="utf-8") as file:
-                  dashboard = json.load(file)
-          else:
-              dashboard = {}
+          with open(DATA_FILE, "r", encoding="utf-8") as file:
+              dashboard = json.load(file)
 
           dashboard.setdefault("sources", {})
           dashboard.setdefault("series", {})
           dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data"
           dashboard["series"]["cds"] = cds
+          dashboard["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
 
           with open(DATA_FILE, "w", encoding="utf-8") as file:
               json.dump(dashboard, file, separators=(",", ":"))
