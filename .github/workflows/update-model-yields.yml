@@ -9,9 +9,9 @@ on:
     types:
       - completed
 
-  # Independent weekly backup refresh: Monday, 23:00 UTC.
+  # Independent weekly backup refresh: Monday, 19:00 UTC.
   schedule:
-    - cron: "0 23 * * 1"
+    - cron: "0 19 * * 1"
 
 permissions:
   contents: write
