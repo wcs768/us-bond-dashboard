@@ -57,9 +57,21 @@ jobs:
           PARAMS = f"?start-date=2016-01-01&end-date={END_DATE}&time-frame=Daily&add-missing-rows=false"
 
           URLS = {
-              "y2": BASE + "1115803" + PARAMS,
-              "y5": BASE + "1115808" + PARAMS,
-              "y10": BASE + "1115802" + PARAMS,
+              "y2": {
+                  "id": "1115803",
+                  "url": BASE + "1115803" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-2-years-usd-historical-data",
+              },
+              "y5": {
+                  "id": "1115808",
+                  "url": BASE + "1115808" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
+              },
+              "y10": {
+                  "id": "1115802",
+                  "url": BASE + "1115802" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
+              },
           }
 
           RAW_COOKIE = os.environ.get("INVESTING_CDS_COOKIE", "")
@@ -90,10 +102,13 @@ jobs:
               if value is None:
                   return None
               text = str(value).strip()
+              # Investing.com commonly uses ISO UTC timestamps such as
+              # 2026-08-24T00:00:00Z in rowDateTimestamp.
               for fmt in (
                   "%Y-%m-%d",
                   "%Y-%m-%dT%H:%M:%S",
                   "%Y-%m-%dT%H:%M:%SZ",
+                  "%Y-%m-%dT%H:%M:%S.%fZ",
                   "%m/%d/%Y",
               ):
                   try:
@@ -110,24 +125,42 @@ jobs:
                   return None
 
           def rows_from_payload(payload):
-              candidates = payload.get("data", payload) if isinstance(payload, dict) else payload
+              if isinstance(payload, dict):
+                  candidates = payload.get("data")
+                  if candidates is None:
+                      candidates = payload.get("items")
+                  if candidates is None:
+                      candidates = payload.get("results")
+                  if candidates is None:
+                      candidates = payload
+              else:
+                  candidates = payload
+
               if not isinstance(candidates, list):
-                  raise RuntimeError("Unexpected Investing.com JSON structure: data is not a list")
+                  raise RuntimeError(
+                      "Unexpected Investing.com JSON structure: "
+                      f"expected list in data/items/results, got {type(candidates).__name__}; "
+                      f"top-level keys={list(payload.keys())[:20] if isinstance(payload, dict) else 'n/a'}"
+                  )
 
               rows = []
               for item in candidates:
                   if isinstance(item, dict):
                       date = (
-                          item.get("date")
+                          item.get("rowDateTimestamp")
+                          or item.get("rowDate")
+                          or item.get("date")
                           or item.get("Date")
                           or item.get("timestamp")
                           or item.get("time")
                       )
                       value = (
-                          item.get("close")
-                          if item.get("close") is not None
-                          else item.get("Close")
+                          item.get("last_close")
+                          if item.get("last_close") is not None
+                          else item.get("close")
                       )
+                      if value is None:
+                          value = item.get("Close")
                       if value is None:
                           value = item.get("last")
                       if value is None:
@@ -146,7 +179,7 @@ jobs:
 
               return rows
 
-          def download(url, attempts=3):
+          def download(url, referer, attempts=3):
               last_error = None
               for attempt in range(1, attempts + 1):
                   try:
@@ -156,10 +189,13 @@ jobs:
                               "Accept": "application/json, text/plain, */*",
                               "Accept-Language": "en-US,en;q=0.9",
                               "Origin": "https://www.investing.com",
-                              "Referer": "https://www.investing.com/",
+                              "Referer": referer,
                               "User-Agent": USER_AGENT,
                               "domain-id": "www",
                               "Cookie": COOKIE,
+                              "Sec-Fetch-Dest": "empty",
+                              "Sec-Fetch-Mode": "cors",
+                              "Sec-Fetch-Site": "same-site",
                           },
                       )
 
@@ -176,11 +212,20 @@ jobs:
               raise RuntimeError(f"Investing.com request failed after {attempts} attempts: {last_error}")
 
           combined = {}
-          for field, url in URLS.items():
-              print(f"Downloading CDS {field}: {url}")
-              rows = rows_from_payload(download(url))
+          for field, config in URLS.items():
+              print(f"Downloading CDS {field}: {config['url']}")
+              payload = download(config["url"], config["referer"])
+              rows = rows_from_payload(payload)
               if not rows:
-                  raise RuntimeError(f"No observations returned for {field}")
+                  sample_keys = []
+                  data = payload.get("data") if isinstance(payload, dict) else payload
+                  if isinstance(data, list) and data and isinstance(data[0], dict):
+                      sample_keys = list(data[0].keys())
+                  raise RuntimeError(
+                      f"No observations returned for {field}; "
+                      f"sample response keys={sample_keys}; "
+                      f"payload message={payload.get('message') if isinstance(payload, dict) else None!r}"
+                  )
               for date, value in rows:
                   combined.setdefault(date, {})[field] = value
               print(f"  -> {len(rows)} observations; latest={max(date for date, _ in rows)}")
