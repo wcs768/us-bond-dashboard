@@ -191,6 +191,7 @@ jobs:
                               "Origin": "https://www.investing.com",
                               "Referer": referer,
                               "User-Agent": USER_AGENT,
+                              "domain": "www",
                               "domain-id": "www",
                               "Cookie": COOKIE,
                               "Sec-Fetch-Dest": "empty",
