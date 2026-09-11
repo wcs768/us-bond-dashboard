@@ -21,19 +21,24 @@ jobs:
           pip install cloudscraper
 
           python - <<'PY'
-
           import json
+          import os
           from datetime import datetime, timezone
           from pathlib import Path
           import cloudscraper
-          
+
+          print("Current working directory:", os.getcwd())
+          print("data/ exists?", Path("data").exists())
+          if Path("data").exists():
+              print("Contents of data/:", os.listdir("data"))
+
           DATA_FILE = Path("data/dashboard.json")
-          END_DATE = datetime.utcnow().strftime("%Y-%m-%d")
+          END_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
           START_DATE = "2016-01-01"
-          
+
           BASE = "https://api.investing.com/api/financialdata/historical/"
           PARAMS = f"?start-date={START_DATE}&end-date={END_DATE}&time-frame=Daily&add-missing-rows=false"
-          
+
           URLS = {
               "y2": {
                   "id": "1115803",
@@ -51,13 +56,13 @@ jobs:
                   "referer": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
               },
           }
-          
+
           USER_AGENT = (
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/140.0.0.0 Safari/537.36"
           )
-          
+
           def as_number(value):
               if value is None or value == "":
                   return None
@@ -65,7 +70,7 @@ jobs:
                   return float(str(value).replace(",", ""))
               except (TypeError, ValueError):
                   return None
-          
+
           def normalise_date(value):
               if value is None:
                   return None
@@ -88,7 +93,7 @@ jobs:
                   return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
               except (TypeError, ValueError, OverflowError, OSError):
                   return None
-          
+
           def rows_from_payload(payload):
               if isinstance(payload, dict):
                   candidates = (
@@ -132,8 +137,8 @@ jobs:
                   if date and value is not None:
                       rows.append((date, value))
               return rows
-          
-          # ---- main ----
+
+          # ---- download ----
           scraper = cloudscraper.create_scraper(
               browser={
                   "browser": "chrome",
@@ -141,7 +146,7 @@ jobs:
                   "desktop": True,
               }
           )
-          
+
           combined = {}
           for field, config in URLS.items():
               print(f"Downloading CDS {field}: {config['url']}")
@@ -157,22 +162,23 @@ jobs:
                   "Sec-Fetch-Mode": "cors",
                   "Sec-Fetch-Site": "same-site",
               }
-              response = scraper.get(config["url"], headers=headers, timeout=60)
-          
+              response = scraper.get(config["url"], headers=headers, timeout=90)
+
               if response.status_code != 200:
                   print(f"  Failed: HTTP {response.status_code}")
-                  print(response.text[:400])
+                  print(response.text[:500])
                   raise RuntimeError(f"HTTP {response.status_code} for {field}")
-          
+
               payload = response.json()
               rows = rows_from_payload(payload)
               if not rows:
                   raise RuntimeError(f"No observations returned for {field}")
-          
+
               for date, value in rows:
                   combined.setdefault(date, {})[field] = value
               print(f"  → {len(rows)} observations; latest={max(d for d, _ in rows)}")
-          
+
+          # ---- build CDS panel ----
           cds = [
               {
                   "date": date,
@@ -182,24 +188,30 @@ jobs:
               }
               for date, values in sorted(combined.items())
           ]
-          
+          if not cds:
+              raise RuntimeError("No combined CDS observations were created")
+
+          # ---- save (safe) ----
+          DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+
           if DATA_FILE.exists():
               with open(DATA_FILE, "r", encoding="utf-8") as f:
                   dashboard = json.load(f)
+              print(f"Loaded existing dashboard.json ({DATA_FILE.stat().st_size} bytes)")
           else:
+              print("WARNING: data/dashboard.json not found – creating new one")
               dashboard = {}
-          
+
           dashboard.setdefault("sources", {})
           dashboard.setdefault("series", {})
-          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS (cloudscraper)"
+          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data (cloudscraper)"
           dashboard["series"]["cds"] = cds
-          
+
           with open(DATA_FILE, "w", encoding="utf-8") as f:
               json.dump(dashboard, f, separators=(",", ":"))
-          
-          print(f"Saved {len(cds)} combined CDS dates")
-          print(f"Latest: {cds[-1]['date']}")
-        
+
+          print(f"Saved {len(cds)} combined CDS dates to {DATA_FILE}")
+          print(f"Latest CDS date: {cds[-1]['date']}")
           PY
           
       - name: Download 10 years of official US Treasury yield-curve data
