@@ -24,7 +24,6 @@ jobs:
           CDS_END_DATE=$(date -u +%F)
           export CDS_END_DATE
 
-          # Install Playwright + Chromium
           pip install playwright
           playwright install chromium --with-deps
 
@@ -129,7 +128,12 @@ jobs:
                           else item.get("close")
                       )
                       if value is None:
-                          value = item.get("Close") or item.get("last") or item.get("price") or item.get("value")
+                          value = (
+                              item.get("Close")
+                              or item.get("last")
+                              or item.get("price")
+                              or item.get("value")
+                          )
                   elif isinstance(item, list) and len(item) >= 2:
                       date, value = item[0], item[-1]
                   else:
@@ -140,9 +144,8 @@ jobs:
                       rows.append((date, value))
               return rows
 
-          def get_fresh_cookies():
-              """Visit Investing.com with Playwright to obtain a live Cloudflare cookie."""
-              print("Launching browser to obtain fresh Cloudflare cookie...")
+          def fetch_all_cds():
+              print("Launching browser and establishing Cloudflare session...")
               with sync_playwright() as p:
                   browser = p.chromium.launch(
                       headless=True,
@@ -150,98 +153,91 @@ jobs:
                           "--disable-blink-features=AutomationControlled",
                           "--no-sandbox",
                           "--disable-setuid-sandbox",
+                          "--disable-dev-shm-usage",
                       ],
                   )
                   context = browser.new_context(
                       user_agent=USER_AGENT,
                       viewport={"width": 1920, "height": 1080},
                       locale="en-US",
+                      extra_http_headers={
+                          "Accept-Language": "en-US,en;q=0.9",
+                      },
                   )
-                  # Hide webdriver flag
+                  # Hide automation signals
                   context.add_init_script("""
                       Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                      window.chrome = { runtime: {} };
                   """)
+
                   page = context.new_page()
 
-                  # Visit a real CDS page so Cloudflare sets __cf_bm / cf_clearance
+                  # 1. Visit a real page so Cloudflare sets cookies + clearance
+                  print("Visiting Investing.com CDS page...")
                   page.goto(
                       "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
                       wait_until="domcontentloaded",
-                      timeout=60000,
+                      timeout=90000,
                   )
-                  # Give Cloudflare a moment to set cookies
-                  time.sleep(4)
-                  # Sometimes a second navigation helps
-                  page.reload(wait_until="domcontentloaded", timeout=30000)
-                  time.sleep(2)
+                  time.sleep(5)          # let Cloudflare finish
+                  page.reload(wait_until="networkidle", timeout=60000)
+                  time.sleep(3)
 
-                  cookies = context.cookies()
-                  browser.close()
+                  # Optional: check we are not still on a challenge page
+                  title = page.title()
+                  print(f"Page title after load: {title}")
+                  if "Just a moment" in title or "Attention Required" in title:
+                      print("Cloudflare challenge still present – waiting longer...")
+                      page.wait_for_timeout(10000)
+                      page.reload(wait_until="networkidle", timeout=60000)
 
-              cookie_dict = {c["name"]: c["value"] for c in cookies}
-              if "__cf_bm" not in cookie_dict and "cf_clearance" not in cookie_dict:
-                  print("Warning: no Cloudflare cookies found. Available cookies:", list(cookie_dict.keys()))
-              # Build a full Cookie header
-              cookie_header = "; ".join(f"{k}={v}" for k, v in cookie_dict.items())
-              print(f"Obtained {len(cookie_dict)} cookies (including Cloudflare ones).")
-              return cookie_header
-
-          def download(url, referer, cookie_header, attempts=3):
-              import urllib.request
-              import urllib.error
-
-              last_error = None
-              for attempt in range(1, attempts + 1):
-                  try:
-                      request = urllib.request.Request(
-                          url,
+                  combined = {}
+                  for field, config in URLS.items():
+                      print(f"Fetching CDS {field} via Playwright request context...")
+                      # Use the same browser context → same cookies + TLS fingerprint
+                      response = context.request.get(
+                          config["url"],
                           headers={
                               "Accept": "application/json, text/plain, */*",
-                              "Accept-Language": "en-US,en;q=0.9",
                               "Origin": "https://www.investing.com",
-                              "Referer": referer,
-                              "User-Agent": USER_AGENT,
+                              "Referer": config["referer"],
                               "domain": "www",
                               "domain-id": "www",
-                              "Cookie": cookie_header,
                               "Sec-Fetch-Dest": "empty",
                               "Sec-Fetch-Mode": "cors",
                               "Sec-Fetch-Site": "same-site",
                           },
+                          timeout=180000,
                       )
-                      with urllib.request.urlopen(request, timeout=180) as response:
-                          body = response.read().decode("utf-8", errors="replace")
-                          if response.status != 200:
-                              raise RuntimeError(f"HTTP {response.status}")
-                          return json.loads(body)
-                  except Exception as error:
-                      last_error = error
-                      print(f"Investing.com download attempt {attempt}/{attempts} failed: {error}")
-                      if attempt < attempts:
-                          time.sleep(attempt * 8)
-              raise RuntimeError(f"Investing.com request failed after {attempts} attempts: {last_error}")
+
+                      if response.status != 200:
+                          body_preview = response.text()[:400]
+                          raise RuntimeError(
+                              f"HTTP {response.status} for {field}: {body_preview}"
+                          )
+
+                      payload = response.json()
+                      rows = rows_from_payload(payload)
+                      if not rows:
+                          sample_keys = []
+                          data = payload.get("data") if isinstance(payload, dict) else payload
+                          if isinstance(data, list) and data and isinstance(data[0], dict):
+                              sample_keys = list(data[0].keys())
+                          raise RuntimeError(
+                              f"No observations for {field}; "
+                              f"sample keys={sample_keys}; "
+                              f"message={payload.get('message') if isinstance(payload, dict) else None!r}"
+                          )
+
+                      for date, value in rows:
+                          combined.setdefault(date, {})[field] = value
+                      print(f"  → {len(rows)} observations; latest={max(d for d, _ in rows)}")
+
+                  browser.close()
+                  return combined
 
           # ---- main ----
-          cookie_header = get_fresh_cookies()
-
-          combined = {}
-          for field, config in URLS.items():
-              print(f"Downloading CDS {field}: {config['url']}")
-              payload = download(config["url"], config["referer"], cookie_header)
-              rows = rows_from_payload(payload)
-              if not rows:
-                  sample_keys = []
-                  data = payload.get("data") if isinstance(payload, dict) else payload
-                  if isinstance(data, list) and data and isinstance(data[0], dict):
-                      sample_keys = list(data[0].keys())
-                  raise RuntimeError(
-                      f"No observations returned for {field}; "
-                      f"sample response keys={sample_keys}; "
-                      f"payload message={payload.get('message') if isinstance(payload, dict) else None!r}"
-                  )
-              for date, value in rows:
-                  combined.setdefault(date, {})[field] = value
-              print(f"  -> {len(rows)} observations; latest={max(date for date, _ in rows)}")
+          combined = fetch_all_cds()
 
           cds = [
               {
@@ -256,8 +252,8 @@ jobs:
               raise RuntimeError("No combined CDS observations were created")
 
           if DATA_FILE.exists():
-              with open(DATA_FILE, "r", encoding="utf-8") as file:
-                  dashboard = json.load(file)
+              with open(DATA_FILE, "r", encoding="utf-8") as f:
+                  dashboard = json.load(f)
           else:
               dashboard = {}
 
@@ -266,13 +262,13 @@ jobs:
           dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data"
           dashboard["series"]["cds"] = cds
 
-          with open(DATA_FILE, "w", encoding="utf-8") as file:
+          with open(DATA_FILE, "w", encoding="utf-8") as f:
               json.dump(dashboard, file, separators=(",", ":"))
 
           print(f"Saved {len(cds)} combined CDS dates to {DATA_FILE}")
           print(f"Latest CDS date: {cds[-1]['date']}")
           PY
-
+          
       - name: Download 10 years of official US Treasury yield-curve data
         shell: bash
         run: |
