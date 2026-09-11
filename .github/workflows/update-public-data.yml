@@ -21,38 +21,158 @@ jobs:
           pip install investiny
 
           python - <<'PY'
+
           import json
           from datetime import datetime, timezone
           from pathlib import Path
-          from investiny import historical_data
-
+          import cloudscraper
+          
           DATA_FILE = Path("data/dashboard.json")
-          END_DATE = datetime.utcnow().strftime("%m/%d/%Y")
-          START_DATE = "01/01/2016"
-
-          # Your existing Investing.com IDs
+          END_DATE = datetime.utcnow().strftime("%Y-%m-%d")
+          START_DATE = "2016-01-01"
+          
+          BASE = "https://api.investing.com/api/financialdata/historical/"
+          PARAMS = f"?start-date={START_DATE}&end-date={END_DATE}&time-frame=Daily&add-missing-rows=false"
+          
           URLS = {
-              "y2": 1115803,
-              "y5": 1115808,
-              "y10": 1115802,
+              "y2": {
+                  "id": "1115803",
+                  "url": BASE + "1115803" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-2-years-usd-historical-data",
+              },
+              "y5": {
+                  "id": "1115808",
+                  "url": BASE + "1115808" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
+              },
+              "y10": {
+                  "id": "1115802",
+                  "url": BASE + "1115802" + PARAMS,
+                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
+              },
           }
-
+          
+          USER_AGENT = (
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/140.0.0.0 Safari/537.36"
+          )
+          
+          def as_number(value):
+              if value is None or value == "":
+                  return None
+              try:
+                  return float(str(value).replace(",", ""))
+              except (TypeError, ValueError):
+                  return None
+          
+          def normalise_date(value):
+              if value is None:
+                  return None
+              text = str(value).strip()
+              for fmt in (
+                  "%Y-%m-%d",
+                  "%Y-%m-%dT%H:%M:%S",
+                  "%Y-%m-%dT%H:%M:%SZ",
+                  "%Y-%m-%dT%H:%M:%S.%fZ",
+                  "%m/%d/%Y",
+              ):
+                  try:
+                      return datetime.strptime(text[:19], fmt).strftime("%Y-%m-%d")
+                  except ValueError:
+                      pass
+              try:
+                  number = float(text)
+                  if number > 1_000_000_000_000:
+                      number /= 1000
+                  return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
+              except (TypeError, ValueError, OverflowError, OSError):
+                  return None
+          
+          def rows_from_payload(payload):
+              if isinstance(payload, dict):
+                  candidates = (
+                      payload.get("data")
+                      or payload.get("items")
+                      or payload.get("results")
+                      or payload
+                  )
+              else:
+                  candidates = payload
+              if not isinstance(candidates, list):
+                  raise RuntimeError(
+                      f"Unexpected structure: {type(candidates).__name__}; "
+                      f"keys={list(payload.keys())[:15] if isinstance(payload, dict) else 'n/a'}"
+                  )
+              rows = []
+              for item in candidates:
+                  if isinstance(item, dict):
+                      date = (
+                          item.get("rowDateTimestamp")
+                          or item.get("rowDate")
+                          or item.get("date")
+                          or item.get("Date")
+                          or item.get("timestamp")
+                      )
+                      value = (
+                          item.get("last_close")
+                          if item.get("last_close") is not None
+                          else item.get("close")
+                          or item.get("Close")
+                          or item.get("last")
+                          or item.get("price")
+                          or item.get("value")
+                      )
+                  elif isinstance(item, list) and len(item) >= 2:
+                      date, value = item[0], item[-1]
+                  else:
+                      continue
+                  date = normalise_date(date)
+                  value = as_number(value)
+                  if date and value is not None:
+                      rows.append((date, value))
+              return rows
+          
+          # ---- main ----
+          scraper = cloudscraper.create_scraper(
+              browser={
+                  "browser": "chrome",
+                  "platform": "windows",
+                  "desktop": True,
+              }
+          )
+          
           combined = {}
-          for field, investing_id in URLS.items():
-              print(f"Downloading CDS {field} (id={investing_id})...")
-              data = historical_data(
-                  investing_id=investing_id,
-                  from_date=START_DATE,
-                  to_date=END_DATE,
-                  interval="D",
-              )
-              # data is a dict with keys: date, open, high, low, close, volume
-              rows = list(zip(data["date"], data["close"]))
+          for field, config in URLS.items():
+              print(f"Downloading CDS {field}: {config['url']}")
+              headers = {
+                  "User-Agent": USER_AGENT,
+                  "Accept": "application/json, text/plain, */*",
+                  "Accept-Language": "en-US,en;q=0.9",
+                  "Origin": "https://www.investing.com",
+                  "Referer": config["referer"],
+                  "domain": "www",
+                  "domain-id": "www",
+                  "Sec-Fetch-Dest": "empty",
+                  "Sec-Fetch-Mode": "cors",
+                  "Sec-Fetch-Site": "same-site",
+              }
+              response = scraper.get(config["url"], headers=headers, timeout=60)
+          
+              if response.status_code != 200:
+                  print(f"  Failed: HTTP {response.status_code}")
+                  print(response.text[:400])
+                  raise RuntimeError(f"HTTP {response.status_code} for {field}")
+          
+              payload = response.json()
+              rows = rows_from_payload(payload)
+              if not rows:
+                  raise RuntimeError(f"No observations returned for {field}")
+          
               for date, value in rows:
-                  if value is not None:
-                      combined.setdefault(date, {})[field] = float(value)
-              print(f"  → {len(rows)} observations; latest={data['date'][-1] if data['date'] else 'n/a'}")
-
+                  combined.setdefault(date, {})[field] = value
+              print(f"  → {len(rows)} observations; latest={max(d for d, _ in rows)}")
+          
           cds = [
               {
                   "date": date,
@@ -62,25 +182,24 @@ jobs:
               }
               for date, values in sorted(combined.items())
           ]
-          if not cds:
-              raise RuntimeError("No combined CDS observations were created")
-
+          
           if DATA_FILE.exists():
               with open(DATA_FILE, "r", encoding="utf-8") as f:
                   dashboard = json.load(f)
           else:
               dashboard = {}
-
+          
           dashboard.setdefault("sources", {})
           dashboard.setdefault("series", {})
-          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data (via tvc6)"
+          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS (cloudscraper)"
           dashboard["series"]["cds"] = cds
-
+          
           with open(DATA_FILE, "w", encoding="utf-8") as f:
               json.dump(dashboard, f, separators=(",", ":"))
-
-          print(f"Saved {len(cds)} combined CDS dates to {DATA_FILE}")
-          print(f"Latest CDS date: {cds[-1]['date']}")
+          
+          print(f"Saved {len(cds)} combined CDS dates")
+          print(f"Latest: {cds[-1]['date']}")
+        
           PY
           
       - name: Download 10 years of official US Treasury yield-curve data
