@@ -14,252 +14,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download repository files
-        uses: actions/checkout@v4
-
       - name: Download U.S. sovereign CDS history from Investing.com
         shell: bash
         run: |
           set -euo pipefail
-          CDS_END_DATE=$(date -u +%F)
-          export CDS_END_DATE
-
-          pip install playwright
-          playwright install chromium --with-deps
+          pip install investiny
 
           python - <<'PY'
           import json
-          import os
-          import time
           from datetime import datetime, timezone
           from pathlib import Path
-          from playwright.sync_api import sync_playwright
+          from investiny import historical_data
 
           DATA_FILE = Path("data/dashboard.json")
-          END_DATE = os.environ["CDS_END_DATE"]
-          BASE = "https://api.investing.com/api/financialdata/historical/"
-          PARAMS = f"?start-date=2016-01-01&end-date={END_DATE}&time-frame=Daily&add-missing-rows=false"
+          END_DATE = datetime.utcnow().strftime("%m/%d/%Y")
+          START_DATE = "01/01/2016"
 
+          # Your existing Investing.com IDs
           URLS = {
-              "y2": {
-                  "id": "1115803",
-                  "url": BASE + "1115803" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-2-years-usd-historical-data",
-              },
-              "y5": {
-                  "id": "1115808",
-                  "url": BASE + "1115808" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
-              },
-              "y10": {
-                  "id": "1115802",
-                  "url": BASE + "1115802" + PARAMS,
-                  "referer": "https://www.investing.com/rates-bonds/united-states-cds-10-years-usd-historical-data",
-              },
+              "y2": 1115803,
+              "y5": 1115808,
+              "y10": 1115802,
           }
 
-          USER_AGENT = (
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) "
-              "Chrome/140.0.0.0 Safari/537.36"
-          )
-
-          def as_number(value):
-              if value is None or value == "":
-                  return None
-              try:
-                  return float(str(value).replace(",", ""))
-              except (TypeError, ValueError):
-                  return None
-
-          def normalise_date(value):
-              if value is None:
-                  return None
-              text = str(value).strip()
-              for fmt in (
-                  "%Y-%m-%d",
-                  "%Y-%m-%dT%H:%M:%S",
-                  "%Y-%m-%dT%H:%M:%SZ",
-                  "%Y-%m-%dT%H:%M:%S.%fZ",
-                  "%m/%d/%Y",
-              ):
-                  try:
-                      return datetime.strptime(text[:19], fmt).strftime("%Y-%m-%d")
-                  except ValueError:
-                      pass
-              try:
-                  number = float(text)
-                  if number > 1_000_000_000_000:
-                      number /= 1000
-                  return datetime.fromtimestamp(number, tz=timezone.utc).strftime("%Y-%m-%d")
-              except (TypeError, ValueError, OverflowError, OSError):
-                  return None
-
-          def rows_from_payload(payload):
-              if isinstance(payload, dict):
-                  candidates = (
-                      payload.get("data")
-                      or payload.get("items")
-                      or payload.get("results")
-                      or payload
-                  )
-              else:
-                  candidates = payload
-              if not isinstance(candidates, list):
-                  raise RuntimeError(
-                      "Unexpected Investing.com JSON structure: "
-                      f"expected list, got {type(candidates).__name__}; "
-                      f"top-level keys={list(payload.keys())[:20] if isinstance(payload, dict) else 'n/a'}"
-                  )
-              rows = []
-              for item in candidates:
-                  if isinstance(item, dict):
-                      date = (
-                          item.get("rowDateTimestamp")
-                          or item.get("rowDate")
-                          or item.get("date")
-                          or item.get("Date")
-                          or item.get("timestamp")
-                          or item.get("time")
-                      )
-                      value = (
-                          item.get("last_close")
-                          if item.get("last_close") is not None
-                          else item.get("close")
-                      )
-                      if value is None:
-                          value = (
-                              item.get("Close")
-                              or item.get("last")
-                              or item.get("price")
-                              or item.get("value")
-                          )
-                  elif isinstance(item, list) and len(item) >= 2:
-                      date, value = item[0], item[-1]
-                  else:
-                      continue
-                  date = normalise_date(date)
-                  value = as_number(value)
-                  if date and value is not None:
-                      rows.append((date, value))
-              return rows
-
-          def fetch_all_cds():
-              print("Launching browser and establishing Cloudflare session...")
-              with sync_playwright() as p:
-                  browser = p.chromium.launch(
-                      headless=True,
-                      args=[
-                          "--disable-blink-features=AutomationControlled",
-                          "--no-sandbox",
-                          "--disable-setuid-sandbox",
-                          "--disable-dev-shm-usage",
-                      ],
-                  )
-                  context = browser.new_context(
-                      user_agent=USER_AGENT,
-                      viewport={"width": 1920, "height": 1080},
-                      locale="en-US",
-                      extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-                  )
-                  context.add_init_script("""
-                      Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                      window.chrome = { runtime: {} };
-                  """)
-
-                  page = context.new_page()
-
-                  # Visit a real CDS page and wait until it looks ready
-                  print("Visiting Investing.com CDS page...")
-                  page.goto(
-                      "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
-                      wait_until="domcontentloaded",
-                      timeout=90000,
-                  )
-
-                  # Give Cloudflare time + try to detect a challenge
-                  for _ in range(6):
-                      title = page.title()
-                      content = page.content()[:2000].lower()
-                      print(f"  title='{title[:80]}'")
-                      if "just a moment" in title.lower() or "attention required" in title.lower() or "cf-browser-verification" in content:
-                          print("  Cloudflare challenge detected – waiting...")
-                          page.wait_for_timeout(5000)
-                          continue
-                      # Look for any sign the real page loaded
-                      if "cds" in title.lower() or "historical" in title.lower() or "investing" in title.lower():
-                          break
-                      page.wait_for_timeout(3000)
-
-                  # Final reload after challenge should have cleared
-                  page.reload(wait_until="networkidle", timeout=60000)
-                  time.sleep(3)
-                  print(f"Final page title: '{page.title()}'")
-
-                  combined = {}
-                  for field, config in URLS.items():
-                      print(f"Fetching CDS {field} from inside the browser context...")
-
-                      # Run the fetch *inside* the page so it uses the real browser environment
-                      result = page.evaluate(
-                          """async ({url, referer}) => {
-                              try {
-                                  const resp = await fetch(url, {
-                                      method: 'GET',
-                                      headers: {
-                                          'Accept': 'application/json, text/plain, */*',
-                                          'Origin': 'https://www.investing.com',
-                                          'Referer': referer,
-                                          'domain': 'www',
-                                          'domain-id': 'www',
-                                      },
-                                      credentials: 'include',
-                                  });
-                                  const text = await resp.text();
-                                  return {
-                                      status: resp.status,
-                                      body: text,
-                                  };
-                              } catch (e) {
-                                  return { status: -1, body: String(e) };
-                              }
-                          }""",
-                          {"url": config["url"], "referer": config["referer"]},
-                      )
-
-                      if result["status"] != 200:
-                          raise RuntimeError(
-                              f"HTTP {result['status']} for {field}: {result['body'][:500]}"
-                          )
-
-                      try:
-                          payload = json.loads(result["body"])
-                      except json.JSONDecodeError as e:
-                          raise RuntimeError(
-                              f"Invalid JSON for {field}: {result['body'][:400]}"
-                          ) from e
-
-                      rows = rows_from_payload(payload)
-                      if not rows:
-                          sample_keys = []
-                          data = payload.get("data") if isinstance(payload, dict) else payload
-                          if isinstance(data, list) and data and isinstance(data[0], dict):
-                              sample_keys = list(data[0].keys())
-                          raise RuntimeError(
-                              f"No observations for {field}; "
-                              f"sample keys={sample_keys}; "
-                              f"message={payload.get('message') if isinstance(payload, dict) else None!r}"
-                          )
-
-                      for date, value in rows:
-                          combined.setdefault(date, {})[field] = value
-                      print(f"  → {len(rows)} observations; latest={max(d for d, _ in rows)}")
-
-                  browser.close()
-                  return combined
-
-          # ---- main ----
-          combined = fetch_all_cds()
+          combined = {}
+          for field, investing_id in URLS.items():
+              print(f"Downloading CDS {field} (id={investing_id})...")
+              data = historical_data(
+                  investing_id=investing_id,
+                  from_date=START_DATE,
+                  to_date=END_DATE,
+                  interval="D",
+              )
+              # data is a dict with keys: date, open, high, low, close, volume
+              rows = list(zip(data["date"], data["close"]))
+              for date, value in rows:
+                  if value is not None:
+                      combined.setdefault(date, {})[field] = float(value)
+              print(f"  → {len(rows)} observations; latest={data['date'][-1] if data['date'] else 'n/a'}")
 
           cds = [
               {
@@ -281,7 +73,7 @@ jobs:
 
           dashboard.setdefault("sources", {})
           dashboard.setdefault("series", {})
-          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data"
+          dashboard["sources"]["cds"] = "Investing.com U.S. sovereign CDS historical data (via tvc6)"
           dashboard["series"]["cds"] = cds
 
           with open(DATA_FILE, "w", encoding="utf-8") as f:
