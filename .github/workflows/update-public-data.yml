@@ -160,11 +160,8 @@ jobs:
                       user_agent=USER_AGENT,
                       viewport={"width": 1920, "height": 1080},
                       locale="en-US",
-                      extra_http_headers={
-                          "Accept-Language": "en-US,en;q=0.9",
-                      },
+                      extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                   )
-                  # Hide automation signals
                   context.add_init_script("""
                       Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                       window.chrome = { runtime: {} };
@@ -172,51 +169,76 @@ jobs:
 
                   page = context.new_page()
 
-                  # 1. Visit a real page so Cloudflare sets cookies + clearance
+                  # Visit a real CDS page and wait until it looks ready
                   print("Visiting Investing.com CDS page...")
                   page.goto(
                       "https://www.investing.com/rates-bonds/united-states-cds-5-years-usd-historical-data",
                       wait_until="domcontentloaded",
                       timeout=90000,
                   )
-                  time.sleep(5)          # let Cloudflare finish
+
+                  # Give Cloudflare time + try to detect a challenge
+                  for _ in range(6):
+                      title = page.title()
+                      content = page.content()[:2000].lower()
+                      print(f"  title='{title[:80]}'")
+                      if "just a moment" in title.lower() or "attention required" in title.lower() or "cf-browser-verification" in content:
+                          print("  Cloudflare challenge detected – waiting...")
+                          page.wait_for_timeout(5000)
+                          continue
+                      # Look for any sign the real page loaded
+                      if "cds" in title.lower() or "historical" in title.lower() or "investing" in title.lower():
+                          break
+                      page.wait_for_timeout(3000)
+
+                  # Final reload after challenge should have cleared
                   page.reload(wait_until="networkidle", timeout=60000)
                   time.sleep(3)
-
-                  # Optional: check we are not still on a challenge page
-                  title = page.title()
-                  print(f"Page title after load: {title}")
-                  if "Just a moment" in title or "Attention Required" in title:
-                      print("Cloudflare challenge still present – waiting longer...")
-                      page.wait_for_timeout(10000)
-                      page.reload(wait_until="networkidle", timeout=60000)
+                  print(f"Final page title: '{page.title()}'")
 
                   combined = {}
                   for field, config in URLS.items():
-                      print(f"Fetching CDS {field} via Playwright request context...")
-                      # Use the same browser context → same cookies + TLS fingerprint
-                      response = context.request.get(
-                          config["url"],
-                          headers={
-                              "Accept": "application/json, text/plain, */*",
-                              "Origin": "https://www.investing.com",
-                              "Referer": config["referer"],
-                              "domain": "www",
-                              "domain-id": "www",
-                              "Sec-Fetch-Dest": "empty",
-                              "Sec-Fetch-Mode": "cors",
-                              "Sec-Fetch-Site": "same-site",
-                          },
-                          timeout=180000,
+                      print(f"Fetching CDS {field} from inside the browser context...")
+
+                      # Run the fetch *inside* the page so it uses the real browser environment
+                      result = page.evaluate(
+                          """async ({url, referer}) => {
+                              try {
+                                  const resp = await fetch(url, {
+                                      method: 'GET',
+                                      headers: {
+                                          'Accept': 'application/json, text/plain, */*',
+                                          'Origin': 'https://www.investing.com',
+                                          'Referer': referer,
+                                          'domain': 'www',
+                                          'domain-id': 'www',
+                                      },
+                                      credentials: 'include',
+                                  });
+                                  const text = await resp.text();
+                                  return {
+                                      status: resp.status,
+                                      body: text,
+                                  };
+                              } catch (e) {
+                                  return { status: -1, body: String(e) };
+                              }
+                          }""",
+                          {"url": config["url"], "referer": config["referer"]},
                       )
 
-                      if response.status != 200:
-                          body_preview = response.text()[:400]
+                      if result["status"] != 200:
                           raise RuntimeError(
-                              f"HTTP {response.status} for {field}: {body_preview}"
+                              f"HTTP {result['status']} for {field}: {result['body'][:500]}"
                           )
 
-                      payload = response.json()
+                      try:
+                          payload = json.loads(result["body"])
+                      except json.JSONDecodeError as e:
+                          raise RuntimeError(
+                              f"Invalid JSON for {field}: {result['body'][:400]}"
+                          ) from e
+
                       rows = rows_from_payload(payload)
                       if not rows:
                           sample_keys = []
@@ -263,7 +285,7 @@ jobs:
           dashboard["series"]["cds"] = cds
 
           with open(DATA_FILE, "w", encoding="utf-8") as f:
-              json.dump(dashboard, file, separators=(",", ":"))
+              json.dump(dashboard, f, separators=(",", ":"))
 
           print(f"Saved {len(cds)} combined CDS dates to {DATA_FILE}")
           print(f"Latest CDS date: {cds[-1]['date']}")
